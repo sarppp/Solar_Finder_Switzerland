@@ -1,0 +1,85 @@
+# System & editor files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.eggs/
+*.egg-info/
+.env
+venv/
+.envrc
+
+# Node / JavaScript
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+dist/
+build/
+coverage/
+.cache/
+
+# Data & runtime artifacts
+logs/
+*.log
+*.pid
+*.seed
+*.sqlite3
+*.db
+
+# Packages / archives / large binaries
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.gz
+*.bz2
+*.7z
+*.iso
+*.bin
+*.dmg
+
+# Media (large by default)
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.flv
+*.wmv
+*.mp3
+*.wav
+*.flac
+*.aac
+
+# Containers / images
+#Dockerfile
+#Dockerfile.*
+#docker-compose*.yml
+
+# Misc build or generated assets
+*.iml
+.tmp/
+.sass-cache/
+coverage-final.json
+
+# Project outputs
+output/
+.windsurf/workflows
+
+# Optional: test artifacts
+pytest.cache/
+.nyc_output/
+
+# Model weights
+*.pt
+*.pth
