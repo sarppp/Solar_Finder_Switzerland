@@ -81,7 +81,20 @@ python get_building_screenshot.py \
 
 Outputs JSON with per-item coords and screenshot paths.
 
-### 3) `feature_guided_sam3.py`
+### 3) `streamlit_site/app.py`
+Streamlit UI to browse results, screenshots, and analyses.
+
+Typical run:
+```bash
+cd streamlit_site
+streamlit run app.py
+```
+
+Notes:
+- Expects cached labels/results under `streamlit_site/bern/` as referenced in the examples above.
+- Update paths in the app if you add new regions.
+
+### 4) `feature_guided_sam3.py`
 Feature-guided SAM3 segmentation using DINOv2 and/or ConvNeXt heatmaps as geometric prompts. Can optionally compare against text-only SAM3.
 
 Examples:
@@ -101,7 +114,7 @@ Outputs:
 - Masks in `feature_guided_outputs/masks`.
 - JSON summary at `feature_guided_outputs/results.json`.
 
-### 4) `detect_solar_panels.py`
+### 5) `detect_solar_panels.py`
 Multi-model solar panel detection with retry logic.
 - Models: YOLO (local), OpenAI vision, Gemini, Ollama (local vision).
 - Supports tiling, ROI, per-image and batch JSON outputs, and visualizations.
@@ -123,7 +136,7 @@ Notes:
 - YOLO uses `/app/solar_panel_yolov8s-seg.pt`; adjust via `--yolo-model`.
 - Ollama needs a running server; choose any vision-capable model via `--ollama-model`.
 
-### 5) `crop_and_clean_image.py`
+### 6) `crop_and_clean_image.py`
 Clean SAM3 visualization overlays and optionally crop to the mask bounds.
 
 Example:
