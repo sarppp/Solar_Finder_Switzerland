@@ -68,10 +68,9 @@ Retry Logic:
 - Jitter prevents thundering herd problems
 - Automatic detection of rate limit vs connection errors
 - Configurable max attempts and delays per model
-"
 
 python3 /app/detect_solar_panels.py streamlit_site/langnau/outputs2/b3597197_B_raustrasse_71l_50m.png --models gemini
-""
+"""
 
 import os
 import sys
