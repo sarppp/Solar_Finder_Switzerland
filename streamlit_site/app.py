@@ -8,12 +8,13 @@ import streamlit as st
 
 # streamlit run app.py --server.port 8501 --server.address 0.0.0.0
 
-PREVIEW_LIMIT = 15
-PREVIEW_JSON = "streamlit_site/langnau/langnau_pv_residential_esid_egrid.json"
-SCREENSHOT_DIRS = ["streamlit_site/langnau/outputs2", "outputs"]
-DETECTIONS_BATCH_JSON = "streamlit_site/langnau/langnau_pv_residential_esid_egrid_batch2.json"
-YOLO_VIZ_DIRS = ["streamlit_site/langnau/yolo_images2", "yolo_images"]
-
+PREVIEW_LIMIT = 100
+PREVIEW_JSON = "streamlit_site/payerne/payerne_buildings.json"
+SCREENSHOT_DIRS = ["streamlit_site/payerne/screenshots"]
+DETECTIONS_BATCH_JSON = "streamlit_site/payerne/payerne_detections.json"
+YOLO_VIZ_DIRS = ["streamlit_site/payerne/detection_viz"]
+# Optional per-image detection JSON directories (fallback); keep empty by default.
+DETECTIONS_DIRS = []
 
 BASE_MAP = {
     "lang": "fr",
@@ -123,12 +124,15 @@ def load_detection_for_image(image_path: str) -> dict | None:
                     if not isinstance(r, dict):
                         continue
                     rp = r.get("image_path")
-                    if rp and Path(str(rp)).stem == stem:
-                        return {"results": [r], "num_items": 1, "models": data.get("models")}
+                    if rp:
+                        detection_stem = Path(str(rp)).stem
+                        # Check if screenshot stem is a prefix of detection stem
+                        if detection_stem.startswith(stem):
+                            return {"results": [r], "num_items": 1, "models": data.get("models")}
         except Exception:
             pass
 
-    for d in DETECTIONS_DIRS:
+    for d in DETECTIONS_DIRS or []:
         p = repo_root / str(d) / f"solar_detection_{stem}.json"
         if p.exists():
             with open(p, "r", encoding="utf-8") as f:
