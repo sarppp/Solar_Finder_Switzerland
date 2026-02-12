@@ -359,7 +359,16 @@ def main() -> None:
         if p.exists():
             image_paths.append(p.resolve())
         else:
-            matches = sorted(Path().glob(pattern))
+            # Handle absolute paths by extracting directory and pattern
+            pattern_path = Path(pattern)
+            if pattern_path.is_absolute():
+                # For absolute paths, use the parent directory for glob
+                parent_dir = pattern_path.parent
+                glob_pattern = pattern_path.name
+                matches = sorted(parent_dir.glob(glob_pattern))
+            else:
+                # For relative patterns, use current directory
+                matches = sorted(Path().glob(pattern))
             image_paths.extend(m.resolve() for m in matches if m.is_file())
     image_paths = sorted(set(image_paths))
     if not image_paths:
