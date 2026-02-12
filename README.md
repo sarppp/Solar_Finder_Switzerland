@@ -2,6 +2,12 @@
 
 A set of scripts for collecting building candidates, grabbing aerial screenshots, segmenting roofs with SAM3 + feature guidance, detecting solar panels with multiple models, and post-processing the masks.
 
+## Project Overview
+
+<img src="assets/readme1.png" alt="Dashboard" width="600"/>
+
+*Figure: Solar Panel Detection Dashboard - Project Overview*
+
 ## Setup
 
 1) Python deps are in `requirements.txt` (includes `sam3 @ git+https://github.com/facebookresearch/sam3.git`).
@@ -16,7 +22,102 @@ A set of scripts for collecting building candidates, grabbing aerial screenshots
 
 ## Scripts
 
-### 1) `region_building_groups.py`
+### 🚀 **Option 1: Unified Pipeline** `run_pipeline.py`
+**Recommended for most users** - Runs the complete end-to-end pipeline in one command.
+
+**Pipeline Stages:**
+1. `region_building_groups.py` – discover buildings in a region/canton
+2. `get_building_screenshot.py` – take aerial screenshots  
+3. `feature_guided_sam3.py` – segment buildings (DINOv2/ConvNeXt + SAM3)
+4. `crop_and_clean_image.py` – crop & isolate each building
+5. `detect_solar_panels.py` – detect solar panels
+
+**View Results in Streamlit:**
+After pipeline completion, go to `streamlit_site/app.py` and update the directory paths at the top:
+
+```python
+PREVIEW_JSON = "streamlit_site/your_region/your_buildings.json"
+SCREENSHOT_DIRS = ["streamlit_site/your_region/screenshots"]
+DETECTIONS_BATCH_JSON = "streamlit_site/your_region/your_detections.json"
+YOLO_VIZ_DIRS = ["streamlit_site/your_region/detection_viz"]
+```
+
+Then run the Streamlit app:
+
+```bash
+cd streamlit_site
+streamlit run app.py --server.port 8501 --server.address 0.0.0.0
+```
+
+**Details:**
+```bash
+
+# Full pipeline for a municipality
+python3 run_pipeline.py --region "Bern" --residential-only
+
+# Skip stages you already ran (resume)
+python3 run_pipeline.py --region "Bern" --start-stage 3
+
+# Dry-run: just print what would be executed
+python3 run_pipeline.py --region "Bern" --dry-run
+
+# Override specific stage parameters
+python3 run_pipeline.py --region "Payerne" \
+  --min-roof-area 200 \
+  --screenshot-size-m 40 \
+  --detection-models yolo,gemini,openai,ollama \
+  --sam-guide dino
+
+# Custom pipeline with specific stages and limits
+python3 run_pipeline.py --region "Bern" \
+  --start-stage 1 --stop-stage 5 \
+  --limit 100 \
+  --min-roof-area 300.0 \
+  --plant-radius 30.0 \
+  --filter-mode all \
+  --pv-only-plants \
+  --max-results 2000 \
+  --residential-only
+
+# Canton examples
+python3 run_pipeline.py --region "Zurich" --canton-level --max-results 1500
+python3 run_pipeline.py --region "Vaud" --canton-level --residential-only
+python3 run_pipeline.py --region "Geneva" --canton-level --start-stage 2
+```
+
+#### Detection Results Comparison
+
+| YOLO Raw Detection | YOLO Detection Success | Gemini Reasoning |
+|-------------------|------------------------|------------------|
+| ![YOLO Detection](assets/readme2.png) | <img src="assets/readme_yolo_detect.png" alt="YOLO Detect Success" width="250"/> | ![Gemini Results](assets/readme3.png) |
+
+*Figure: Left shows YOLO's bounding box detection, middle shows successful YOLO solar panel detection, right shows Gemini's advanced reasoning and context analysis*
+
+#### DINOv2 Feature Engineering
+
+| DINOv2 Cosine Similarity Heatmap |
+|---------------------------------|
+| ![DINO Cosine](assets/readme_dino_cosine.png) |
+
+DINOv2 provides **perfect feature extraction** for aerial imagery, creating robust similarity maps that guide SAM3 to precise roof boundaries. The cosine similarity heatmaps show how DINOv2 understands building structures without any training, making it ideal for geometric prompting.
+
+**Future Development:** DINOv3 promises even better feature representation with improved multi-scale understanding and enhanced robustness for satellite/aerial imagery, potentially eliminating the need for additional guidance methods.
+
+#### SAM3 + DINOv2 Segmentation Examples
+
+| SAM3 Mask Output | SAM3 Normalized Features | DINO + SAM3 Feature Guidance |
+|------------------|--------------------------|-----------------------------|
+| ![SAM3 Mask](assets/sam3_mask.png) | ![SAM3 Normalized](assets/sam3_norm.png) | ![DINO + SAM3](assets/readme_dino_and_sam.png) |
+
+*Figure: SAM3 segmentation with DINOv2 feature guidance for precise roof boundary detection*
+
+
+---
+
+### 🔧 **Option 2: Individual Scripts** 
+**For advanced users** - Run each step manually for fine-grained control.
+
+#### 1) `region_building_groups.py`
 Collect roof facets + nearby plants from Swiss GeoAdmin for a region or a single coordinate. Supports resume, filtering, DBSCAN clustering, and optional solar metrics.
 
 Examples:
@@ -119,7 +220,8 @@ Multi-model solar panel detection with retry logic.
 - Models: YOLO (local), OpenAI vision, Gemini, Ollama (local vision).
 - Supports tiling, ROI, per-image and batch JSON outputs, and visualizations.
 
-Examples:
+
+Other small examples:
 ```bash
 # YOLO only from JSON screenshots
 python detect_solar_panels.py --input-json screenshots_run.json --limit 10 --models yolo --no-viz
