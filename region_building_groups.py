@@ -272,7 +272,64 @@ def region_bbox_from_name(place_name: str) -> tuple[float, float, float, float]:
         return best
     if fallback is not None:
         return fallback
-    raise ValueError(f"No bbox available for region: {place_name}")
+    raise ValueError(f"No bbox found for region name: {place_name}")
+
+
+def canton_bbox_from_name(canton_name: str) -> tuple[float, float, float, float]:
+    """Lookup canton bounding box via GeoAdmin SearchServer.
+
+    Prefers results where origin == 'kantone'; falls back to first result with a bbox.
+    """
+    resp = requests.get(
+        f"{GEOADMIN_BASE}/SearchServer",
+        params={"searchText": canton_name, "type": "locations"},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    results = data.get("results") or []
+    if not results:
+        raise ValueError(f"No locations found for canton name: {canton_name}")
+
+    best = None
+    fallback = None
+    for r in results:
+        attrs = r.get("attrs", {})
+        bbox = attrs.get("geom_st_box2d") or attrs.get("boundingbox")
+        if not bbox:
+            continue
+
+        if isinstance(bbox, str):
+            parts = [p.strip() for p in bbox.replace("BOX(", "").replace(")", "").replace(",", " ").split()]
+            if len(parts) >= 4:
+                try:
+                    min_y, min_x, max_y, max_x = map(float, parts[:4])
+                    bbox = (min_y, min_x, max_y, max_x)
+                except Exception:
+                    bbox = None
+
+        if not bbox or len(bbox) < 4:
+            continue
+
+        min_y, min_x, max_y, max_x = float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])
+
+        if min_y < 1000000:
+            min_y += 2000000
+            max_y += 2000000
+            min_x += 1000000
+            max_x += 1000000
+
+        origin = str(attrs.get("origin") or "")
+        if best is None and origin.lower() == "kantone":
+            best = (min_y, min_x, max_y, max_x)
+        if fallback is None:
+            fallback = (min_y, min_x, max_y, max_x)
+
+    if best is not None:
+        return best
+    if fallback is not None:
+        return fallback
+    raise ValueError(f"No bbox found for canton name: {canton_name}")
 
 def identify_envelope(layer_bodid: str, min_y: float, min_x: float, max_y: float, max_x: float) -> dict:
     url = f"{GEOADMIN_BASE}/MapServer/identify"
@@ -804,8 +861,9 @@ def collect_buildings_from_region(
     sleep_s: float,
     progress_every_pct: int,
     state_file: str | None = None,
+    bbox_fn: callable = region_bbox_from_name,
 ) -> tuple[dict[int, Building], dict]:
-    min_y, min_x, max_y, max_x = region_bbox_from_name(region)
+    min_y, min_x, max_y, max_x = bbox_fn(region)
 
     facets, debug_info = tile_query(
         layer_bodid="ch.bfe.solarenergie-eignung-daecher",
@@ -1032,6 +1090,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--region", default=None, help="Region name (e.g., 'Payerne'). Use --coord for single building mode.")
     parser.add_argument("--coord", default=None, help="Single coordinate mode: 'y,x' (e.g., '2561977.054,1185216.497'). Overrides --region.")
+    parser.add_argument("--canton", default=None, help="Canton name (e.g., 'Bern'). Mutually exclusive with --region and --coord.")
     parser.add_argument("--min-roof-area", type=float, default=200.0)
     parser.add_argument("--plant-radius", type=float, default=30.0)
     parser.add_argument("--filter-mode", choices=["all", "no_pv", "pv", "no_plants"], default="all")
@@ -1094,8 +1153,11 @@ def main() -> None:
             logger.info(f"Single building mode: y={coord_y}, x={coord_x}")
         except ValueError:
             raise SystemExit(f"Invalid coordinate values: {args.coord!r}")
-    elif not args.region:
-        raise SystemExit("Provide either --region 'RegionName' or --coord 'y,x'")
+    elif not args.region and not args.canton:
+        raise SystemExit("Provide either --region 'RegionName', --canton 'CantonName', or --coord 'y,x'")
+
+    if args.region and args.canton:
+        raise SystemExit("Use only one of --region or --canton (not both)")
 
     if args.skip_labels and args.restrict_to_region_label:
         raise SystemExit("--restrict-to-region-label requires labels; remove it or run without --skip-labels")
@@ -1143,8 +1205,11 @@ def main() -> None:
             state_file=None,
         )
     else:
+        target_region = args.region if args.region else args.canton
+        bbox_fn = region_bbox_from_name if args.region else canton_bbox_from_name
+
         buildings, debug_buildings = collect_buildings_from_region(
-            region=args.region,
+            region=target_region,
             min_roof_area_m2=args.min_roof_area,
             tile_size_m=args.tile_size_m,
             min_tile_size_m=args.min_tile_size_m,
@@ -1154,6 +1219,7 @@ def main() -> None:
             sleep_s=args.sleep_s,
             progress_every_pct=args.progress_every_pct,
             state_file=args.state_file,
+            bbox_fn=bbox_fn,
         )
 
         bbox = (debug_buildings.get("region_bbox_lv95") or {}) if isinstance(debug_buildings, dict) else {}
@@ -1388,7 +1454,8 @@ def main() -> None:
 
     pv_count = sum(1 for r in items if r.get("has_pv_plant"))
     no_pv_count = len(items) - pv_count
-    summary = {"region": args.region, "total": len(items), "pv": pv_count, "no_pv": no_pv_count}
+    summary_region = args.region if args.region else args.canton
+    summary = {"region": summary_region, "total": len(items), "pv": pv_count, "no_pv": no_pv_count}
 
     output = {
         "debug": {"buildings": debug_buildings, "plants": debug_plants} if args.debug else None,
