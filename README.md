@@ -1,6 +1,11 @@
 # Solar Roof Toolkit
 
-A set of scripts for collecting building candidates, grabbing aerial screenshots, segmenting roofs with SAM3 + feature guidance, detecting solar panels with multiple models, and post-processing the masks.
+A comprehensive Swiss solar panel detection system featuring:
+- **Region-scale building discovery** with GeoAdmin integration and residential/PV filtering
+- **AI-powered roof segmentation** using SAM3 with DINOv2/ConvNeXt feature guidance  
+- **Multi-model solar detection** (YOLO, OpenAI, Gemini, Ollama) with intelligent retry logic
+- **Unified pipeline** for end-to-end processing from canton to individual buildings
+- **Interactive Streamlit dashboard** for results visualization and analysis
 
 ## Project Overview
 
