@@ -104,6 +104,13 @@ python3 run_pipeline.py --region "Payerne" \
   --detection-models yolo \
   --yolo-conf 0.25 
 
+
+python run_pipeline.py \
+  --region "Payerne" \
+  --start-stage 5 --stop-stage 5 \
+  --detection-models gemini \
+  --append-model gemini \
+  --gemini-delay-between 2.0
 """
  
 import argparse
