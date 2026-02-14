@@ -83,3 +83,6 @@ pytest.cache/
 # Model weights
 *.pt
 *.pth
+
+# Streamlit site folders (exclude subdirectories but keep main files)
+streamlit_site/*/

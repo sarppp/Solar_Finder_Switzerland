@@ -237,6 +237,8 @@ def build_parser() -> argparse.ArgumentParser:
     g = p.add_argument_group("Pipeline control")
     g.add_argument("--region", required=False,
                    help="Region / municipality name to search (e.g. 'Langnau im Emmental')")
+    g.add_argument("--street", required=False,
+                   help="Street or address search text (handled via region lookup in stage 1)")
     g.add_argument("--canton", required=False,
                    help="Canton name to search (e.g. 'Bern'). Mutually exclusive with --region.")
     g.add_argument("--output-dir", default=None,
@@ -341,12 +343,13 @@ def main() -> None:
     args = parser.parse_args()
  
     # ── Derive paths ───────────────────────────────────────────────────
-    if not args.region and not args.canton:
-        sys.exit("Provide either --region or --canton")
-    if args.region and args.canton:
-        sys.exit("Use only one of --region or --canton (not both)")
+    location_selectors = [args.region, args.street, args.canton]
+    if sum(1 for v in location_selectors if v) == 0:
+        sys.exit("Provide one of --region, --street, or --canton")
+    if sum(1 for v in location_selectors if v) > 1:
+        sys.exit("Use only one of --region, --street, or --canton")
 
-    region_name = args.region or args.canton
+    region_name = args.region or args.street or args.canton
     slug = _sanitize(region_name)
     base_dir = args.output_dir or f"/app/streamlit_site/{slug}"
     base_dir = os.path.abspath(base_dir)
@@ -389,9 +392,11 @@ def main() -> None:
         cmd = [
             sys.executable, "/app/region_building_groups.py",
         ]
-        if args.region:
+        if args.street:
+            cmd += ["--region", args.street]
+        elif args.region:
             cmd += ["--region", args.region]
-        else:
+        elif args.canton:
             cmd += ["--canton", args.canton]
         cmd += [
             "--min-roof-area", str(args.min_roof_area),
@@ -402,7 +407,11 @@ def main() -> None:
             "--label-cache", label_cache,
             "--tile-size-m", str(args.tile_size_m),
             "--min-tile-size-m", str(args.min_tile_size_m),
-            "--restrict-to-region-label",
+        ]
+        # Only restrict to region label for municipalities/cantons, not street addresses
+        if not args.street:
+            cmd.append("--restrict-to-region-label")
+        cmd += [
             "--sleep-s", str(args.sleep_s),
             "--progress-every-pct", "10",
             "--max-results", str(args.max_results),

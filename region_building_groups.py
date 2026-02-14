@@ -223,6 +223,15 @@ def cluster_buildings(buildings: dict[int, Building], eps_m: float = 200.0, min_
     return buildings
 
 def region_bbox_from_name(place_name: str) -> tuple[float, float, float, float]:
+    """Lookup region/municipality/street/canton bounding box via GeoAdmin SearchServer.
+    
+    Priority order:
+    1. gg25 (municipalities) - most reliable for region searches
+    2. kantone (cantons) - for canton-level searches
+    3. address (streets) - for specific street addresses
+    
+    For ambiguous street names, raises an error with suggestions.
+    """
     resp = requests.get(
         f"{GEOADMIN_BASE}/SearchServer",
         params={"searchText": place_name, "type": "locations"},
@@ -234,8 +243,9 @@ def region_bbox_from_name(place_name: str) -> tuple[float, float, float, float]:
     if not results:
         raise ValueError(f"No locations found for region name: {place_name}")
 
-    best = None
-    fallback = None
+    # Collect all valid results by origin type
+    by_origin = {"gg25": [], "kantone": [], "address": [], "other": []}
+    
     for r in results:
         attrs = r.get("attrs", {})
         bbox = attrs.get("geom_st_box2d") or attrs.get("boundingbox")
@@ -263,16 +273,88 @@ def region_bbox_from_name(place_name: str) -> tuple[float, float, float, float]:
             max_x += 1000000
 
         origin = str(attrs.get("origin") or "")
-        if best is None and origin == "gg25":
-            best = (min_y, min_x, max_y, max_x)
-        if fallback is None:
-            fallback = (min_y, min_x, max_y, max_x)
+        label = attrs.get("label", place_name)
+        
+        result_entry = {
+            "bbox": (min_y, min_x, max_y, max_x),
+            "label": label,
+            "origin": origin,
+            "attrs": attrs
+        }
+        
+        if origin == "gg25":
+            by_origin["gg25"].append(result_entry)
+        elif origin.lower() == "kantone":
+            by_origin["kantone"].append(result_entry)
+        elif origin == "address":
+            by_origin["address"].append(result_entry)
+        else:
+            by_origin["other"].append(result_entry)
 
-    if best is not None:
-        return best
-    if fallback is not None:
-        return fallback
-    raise ValueError(f"No bbox found for region name: {place_name}")
+    # Priority 1: Municipality (gg25)
+    if by_origin["gg25"]:
+        if len(by_origin["gg25"]) == 1:
+            logger.info(f"Found municipality: {by_origin['gg25'][0]['label']}")
+            return by_origin["gg25"][0]["bbox"]
+        else:
+            logger.warning(f"Multiple municipalities found for '{place_name}', using first: {by_origin['gg25'][0]['label']}")
+            return by_origin["gg25"][0]["bbox"]
+    
+    # Priority 2: Canton (kantone)
+    if by_origin["kantone"]:
+        if len(by_origin["kantone"]) == 1:
+            logger.info(f"Found canton: {by_origin['kantone'][0]['label']}")
+            return by_origin["kantone"][0]["bbox"]
+        else:
+            logger.warning(f"Multiple cantons found for '{place_name}', using first: {by_origin['kantone'][0]['label']}")
+            return by_origin["kantone"][0]["bbox"]
+    
+    # Priority 3: Address (streets) - warn if ambiguous, expand point to area
+    if by_origin["address"]:
+        if len(by_origin["address"]) == 1:
+            addr_bbox = by_origin["address"][0]["bbox"]
+            min_y, min_x, max_y, max_x = addr_bbox
+            
+            # Street addresses are often single points (0m x 0m)
+            # Expand to a search area if the bbox is too small
+            width = max_y - min_y
+            height = max_x - min_x
+            
+            if width < 10 and height < 10:
+                # Expand to 200m radius around the point for building search
+                search_radius_m = 200.0
+                center_y = (min_y + max_y) / 2
+                center_x = (min_x + max_x) / 2
+                min_y = center_y - search_radius_m
+                max_y = center_y + search_radius_m
+                min_x = center_x - search_radius_m
+                max_x = center_x + search_radius_m
+                logger.info(f"Found street address: {by_origin['address'][0]['label']} (expanded to {search_radius_m*2:.0f}m search area)")
+            else:
+                logger.info(f"Found street address: {by_origin['address'][0]['label']}")
+            
+            return (min_y, min_x, max_y, max_x)
+        else:
+            # Multiple street addresses found - this is ambiguous
+            logger.error(f"Ambiguous street name '{place_name}' - found {len(by_origin['address'])} locations:")
+            for i, addr in enumerate(by_origin["address"][:10], 1):
+                logger.error(f"  {i}. {addr['label']}")
+            if len(by_origin["address"]) > 10:
+                logger.error(f"  ... and {len(by_origin['address']) - 10} more")
+            
+            raise ValueError(
+                f"Ambiguous street name '{place_name}' found in {len(by_origin['address'])} locations. "
+                f"Please provide a more specific address (e.g., '{place_name} <house_number>, <municipality>') "
+                f"or use the municipality name instead. "
+                f"First few matches: {', '.join(a['label'] for a in by_origin['address'][:3])}"
+            )
+    
+    # Fallback: Other origin types
+    if by_origin["other"]:
+        logger.warning(f"Using fallback result for '{place_name}': {by_origin['other'][0]['label']}")
+        return by_origin["other"][0]["bbox"]
+    
+    raise ValueError(f"No valid bounding box found for region name: {place_name}")
 
 
 def canton_bbox_from_name(canton_name: str) -> tuple[float, float, float, float]:
