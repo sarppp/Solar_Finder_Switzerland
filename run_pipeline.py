@@ -106,11 +106,17 @@ python3 run_pipeline.py --region "Payerne" \
 
 
 python run_pipeline.py \
-  --region "Payerne" \
+  --region "Langnau im Emmental" \
   --start-stage 5 --stop-stage 5 \
   --detection-models gemini \
   --append-model gemini \
   --gemini-delay-between 2.0
+
+python run_pipeline.py --region "Langnau im Emmental" \  \                  
+  --start-stage 5 --stop-stage 5 \ \
+  --detection-input-dir streamlit_site/langnau_im_emmental/cleaned_flat \ \
+  --append-model gemini \ \
+  --gemini-delay-between 3
 """
  
 import argparse

@@ -8,13 +8,21 @@ import streamlit as st
 
 # streamlit run app.py --server.port 8501 --server.address 0.0.0.0
 
-PREVIEW_LIMIT = 100
-PREVIEW_JSON = "streamlit_site/payerne/payerne_buildings.json"
-SCREENSHOT_DIRS = ["streamlit_site/payerne/screenshots"]
-DETECTIONS_BATCH_JSON = "streamlit_site/payerne/payerne_detections.json"
-YOLO_VIZ_DIRS = ["streamlit_site/payerne/detection_viz"]
+#PREVIEW_LIMIT = 100
+#PREVIEW_JSON = "streamlit_site/payerne/payerne_buildings.json"
+#SCREENSHOT_DIRS = ["streamlit_site/payerne/screenshots"]
+#DETECTIONS_BATCH_JSON = "streamlit_site/payerne/payerne_detections.json"
+#YOLO_VIZ_DIRS = ["streamlit_site/payerne/detection_viz"]
 # Optional per-image detection JSON directories (fallback); keep empty by default.
+#DETECTIONS_DIRS = []
+
+PREVIEW_LIMIT = 100
+PREVIEW_JSON = "streamlit_site/langnau_im_emmental/langnau_im_emmental_buildings.json"
+SCREENSHOT_DIRS = ["streamlit_site/langnau_im_emmental/screenshots"]
+DETECTIONS_BATCH_JSON = "streamlit_site/langnau_im_emmental/langnau_im_emmental_detections.json"
+YOLO_VIZ_DIRS = ["streamlit_site/langnau_im_emmental/detection_viz"]
 DETECTIONS_DIRS = []
+
 
 BASE_MAP = {
     "lang": "fr",
@@ -319,12 +327,22 @@ def main() -> None:
                 if img_path and Path(img_path).exists():
                     st.image(img_path, use_container_width=True)
                 else:
-                    st.info("No screenshot found in /app/outputs for this label.")
+                    st.info(
+                        "No screenshot found in "
+                        + ", ".join(SCREENSHOT_DIRS or ["configured screenshot dirs"])
+                        + " for this label."
+                    )
 
             with cdet:
                 st.subheader("Solar detection")
                 if det is None:
-                    st.info("No solar_detection_*.json found for this screenshot.")
+                    fallback_dirs = ", ".join(DETECTIONS_DIRS or [])
+                    st.info(
+                        "No detections found in "
+                        + DETECTIONS_BATCH_JSON
+                        + (f" or {fallback_dirs}" if fallback_dirs else "")
+                        + "."
+                    )
                 else:
                     item0 = (det.get("results") or [{}])[0] if isinstance(det.get("results"), list) else {}
 
