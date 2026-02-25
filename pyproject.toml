@@ -1,0 +1,25 @@
+[project]
+name = "solar"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "python-dotenv",
+    "google-genai",
+    "openai",
+    "ultralytics",
+    "huggingface-hub",
+    "streamlit",
+    "scipy",
+    "tqdm",
+    "ollama",
+    "scikit-learn",
+    "sam3 @ git+https://github.com/facebookresearch/sam3.git",
+    "einops",
+    "pycocotools",
+    "opencv-python",
+    "pillow",
+    "decord",
+    "psutil",
+]
