@@ -47,6 +47,17 @@ from scipy.ndimage import label, binary_fill_holes
 from sklearn.decomposition import PCA
 from torchvision import transforms
 
+# Monkey-patch pkg_resources for sam3 compatibility
+import importlib.resources
+import types
+pkg_resources = types.ModuleType("pkg_resources")
+pkg_resources.resource_filename = lambda package, path: str(
+    importlib.resources.files(package).joinpath(path)
+)
+import sys
+sys.modules["pkg_resources"] = pkg_resources
+
+# now safe to import sam3
 from sam3.model_builder import build_sam3_image_model
 from sam3.model.sam3_image_processor import Sam3Processor
 

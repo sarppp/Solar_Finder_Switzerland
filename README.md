@@ -18,7 +18,7 @@ A comprehensive Swiss solar panel detection system featuring:
 1) Python deps are in `requirements.txt` (includes `sam3 @ git+https://github.com/facebookresearch/sam3.git`).
 2) Recommended: create a virtualenv and install via `pip install -r requirements.txt`.
 3) Optional model/assets:
-   - YOLO weights: `/app/solar_panel_yolov8s-seg.pt` (used by `detect_solar_panels.py`).
+   - YOLO weights: `solar_panel_yolov8s-seg.pt` (used by `detect_solar_panels.py`).
    - SAM3 + DINOv2/ConvNeXt are downloaded on first run of `feature_guided_sam3.py`.
 4) API keys (put in `.env`):
    - `OPENAI_API_KEY` for OpenAI vision.
@@ -135,7 +135,7 @@ python region_building_groups.py \
   --filter-mode all \
   --pv-only-plants \
   --neighbor-within-m 200 \
-  --label-cache /app/streamlit_site/langnau/langnau_labels_cache.json \
+  --label-cache streamlit_site/langnau/langnau_labels_cache.json \
   --tile-size-m 500 --min-tile-size-m 125 \
   --restrict-to-region-label \
   --max-results 2000 \
@@ -147,7 +147,7 @@ python region_building_groups.py \
   --label-mode gwr_prefer \
   --include-raw-results \
   --state-file /tmp/bern_state.json \
-  --out /app/streamlit_site/bern/bern_pv_residential_esid_egrid.json
+  --out streamlit_site/bern/bern_pv_residential_esid_egrid.json
 
 # Single building debug
 python region_building_groups.py \
@@ -181,7 +181,7 @@ python get_building_screenshot.py \
 
 # From region results JSON (uses coordinates.y/x)
 python get_building_screenshot.py \
-  --input-json /app/streamlit_site/bern/bern_pv_residential_esid_egrid.json \
+  --input-json streamlit_site/bern/bern_pv_residential_esid_egrid.json \
   --screenshots-dir outputs --screenshot-size-m 50 --screenshot-width 800 --screenshot-height 800 --reuse-screenshot --limit 10
 ```
 
@@ -240,7 +240,7 @@ python detect_solar_panels.py outputs/*.png --models gemini --gemini-delay-betwe
 
 Notes:
 - Set `OPENAI_API_KEY` / `GOOGLE_API_KEY` / `OPEN_ROUTER_API_KEY` for API models.
-- YOLO uses `/app/solar_panel_yolov8s-seg.pt`; adjust via `--yolo-model`.
+- YOLO uses `solar_panel_yolov8s-seg.pt`; adjust via `--yolo-model`.
 - Ollama needs a running server; choose any vision-capable model via `--ollama-model`.
 
 ### 6) `crop_and_clean_image.py`

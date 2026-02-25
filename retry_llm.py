@@ -58,8 +58,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--detect-script",
-        default="/app/detect_solar_panels.py",
-        help="Path to detect_solar_panels.py (defaults to /app/detect_solar_panels.py).",
+        default=os.path.join(BASE_DIR, "detect_solar_panels.py"),
+        help="Path to detect_solar_panels.py (detect_solar_panels.py).",
     )
     parser.add_argument(
         "--python-bin",
@@ -165,7 +165,7 @@ def run_detection_chunk(
     cmd += extra_args
 
     print(f"\nRunning {model} on {len(image_paths)} images → {temp_out}")
-    result = subprocess.run(cmd, cwd="/app")
+    result = subprocess.run(cmd, cwd=BASE_DIR)
     if result.returncode != 0:
         raise RuntimeError(f"detect_solar_panels failed with exit code {result.returncode}")
 

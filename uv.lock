@@ -2865,9 +2865,15 @@ dependencies = [
     { name = "sam3" },
     { name = "scikit-learn" },
     { name = "scipy" },
+    { name = "setuptools" },
     { name = "streamlit" },
     { name = "tqdm" },
     { name = "ultralytics" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "setuptools" },
 ]
 
 [package.metadata]
@@ -2886,10 +2892,14 @@ requires-dist = [
     { name = "sam3", git = "https://github.com/facebookresearch/sam3.git" },
     { name = "scikit-learn" },
     { name = "scipy" },
+    { name = "setuptools" },
     { name = "streamlit" },
     { name = "tqdm" },
     { name = "ultralytics" },
 ]
+
+[package.metadata.requires-dev]
+dev = [{ name = "setuptools", specifier = ">=82.0.0" }]
 
 [[package]]
 name = "streamlit"

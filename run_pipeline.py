@@ -72,12 +72,14 @@ python3 run_pipeline.py --region "Langnau im Emmental" \
 
 # Estavayer-le-Lac
 
-python3 run_pipeline.py --region "Payerne" \
+uv run python3 run_pipeline.py \
+  --region "Langnau im Emmental" \
+  --output-dir streamlit_site/langnau_run_2025_03 \
   --start-stage 1 \
   --stop-stage 5 \
-  --min-roof-area 300.0 \
+  --min-roof-area 400.0 \
   --plant-radius 30.0 \
-  --filter-mode no_plants \
+  --filter-mode no_pv \
   --pv-only-plants \
   --neighbor-within-m 200.0 \
   --max-results 2000 \
@@ -92,7 +94,6 @@ python3 run_pipeline.py --region "Payerne" \
   --screenshot-size-m 50.0 \
   --screenshot-width 800 \
   --screenshot-height 800 \
-  --reuse-screenshot \
   --sam-guide dino \
   --sam-prompt "the main building" \
   --sam-threshold-pct 70 \
@@ -102,8 +103,7 @@ python3 run_pipeline.py --region "Payerne" \
   --crop-background transparent \
   --crop-padding 0 \
   --detection-models yolo \
-  --yolo-conf 0.25 
-
+  --yolo-conf 0.25
 
 python run_pipeline.py \
   --region "Langnau im Emmental" \
@@ -128,6 +128,8 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 import cv2
 import numpy as np
@@ -225,7 +227,7 @@ def _run(cmd: list[str], label: str, dry_run: bool) -> int:
         return 0
  
     t0 = time.time()
-    proc = subprocess.run(cmd, cwd="/app")
+    proc = subprocess.run(cmd, cwd=BASE_DIR)
     elapsed = time.time() - t0
     status = "OK" if proc.returncode == 0 else f"FAILED (exit {proc.returncode})"
     print(f"\n  [{status}] {label}  ({elapsed:.1f}s)")
@@ -248,7 +250,7 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--canton", required=False,
                    help="Canton name to search (e.g. 'Bern'). Mutually exclusive with --region.")
     g.add_argument("--output-dir", default=None,
-                   help="Root output directory (default: /app/streamlit_site/<region_slug>)")
+                   help="Root output directory (default: streamlit_site/<region_slug>)")
     g.add_argument("--start-stage", type=int, default=1, choices=[1, 2, 3, 4, 5],
                    help="Resume from this stage (1-5, default: 1)")
     g.add_argument("--stop-stage", type=int, default=5, choices=[1, 2, 3, 4, 5],
@@ -357,7 +359,7 @@ def main() -> None:
 
     region_name = args.region or args.street or args.canton
     slug = _sanitize(region_name)
-    base_dir = args.output_dir or f"/app/streamlit_site/{slug}"
+    base_dir = args.output_dir or os.path.join(BASE_DIR, "streamlit_site", slug)
     base_dir = os.path.abspath(base_dir)
  
     buildings_json   = os.path.join(base_dir, f"{slug}_buildings.json")
@@ -396,7 +398,7 @@ def main() -> None:
     # ── Stage 1: Building discovery ────────────────────────────────────
     if args.start_stage <= 1 <= args.stop_stage:
         cmd = [
-            sys.executable, "/app/region_building_groups.py",
+            sys.executable, os.path.join(BASE_DIR, "region_building_groups.py"),
         ]
         if args.street:
             cmd += ["--region", args.street]
@@ -448,7 +450,7 @@ def main() -> None:
     # ── Stage 2: Screenshots ──────────────────────────────────────────
     if args.start_stage <= 2 <= args.stop_stage:
         cmd = [
-            sys.executable, "/app/get_building_screenshot.py",
+            sys.executable, os.path.join(BASE_DIR, "get_building_screenshot.py"),
             "--input-json", buildings_json,
             "--screenshots-dir", screenshots_dir,
             "--screenshot-size-m", str(args.screenshot_size_m),
@@ -469,7 +471,7 @@ def main() -> None:
  
         if not args.dry_run:
             t0 = time.time()
-            proc = subprocess.run(cmd, capture_output=True, text=True, cwd="/app")
+            proc = subprocess.run(cmd, capture_output=True, text=True, cwd=BASE_DIR)
             elapsed = time.time() - t0
             # Print stderr (progress info)
             if proc.stderr:
@@ -492,7 +494,7 @@ def main() -> None:
         screenshot_pattern = os.path.join(screenshots_dir, "*.png")
 
         cmd = [
-            sys.executable, "/app/feature_guided_sam3.py",
+            sys.executable, os.path.join(BASE_DIR, "feature_guided_sam3.py"),
             screenshot_pattern,
             "--guide", args.sam_guide,
             "--prompt", args.sam_prompt,
@@ -558,7 +560,7 @@ def main() -> None:
                         continue
  
                     cmd = [
-                        sys.executable, "/app/crop_and_clean_image.py",
+                        sys.executable, os.path.join(BASE_DIR, "crop_and_clean_image.py"),
                         "--original", original_path,
                         "--mask", mask_path,
                         "--output-dir", cleaned_dir,
@@ -566,7 +568,7 @@ def main() -> None:
                         "--padding", str(args.crop_padding),
                         "--background", args.crop_background,
                     ]
-                    proc = subprocess.run(cmd, capture_output=True, text=True, cwd="/app")
+                    proc = subprocess.run(cmd, capture_output=True, text=True, cwd=BASE_DIR)
                     if proc.returncode == 0:
                         processed += 1
                     else:
@@ -589,7 +591,7 @@ def main() -> None:
         flat_dir = os.path.join(base_dir, "cleaned_flat")
         if not args.dry_run:
             print(f"\n{'='*70}")
-            print(f"  PRE-STAGE 5: Flatten cleaned PNGs (alpha → white bg)")
+            print(f"  STEP 5A: Flatten cleaned PNGs (alpha → white bg)")
             print(f"{'='*70}")
             n_flat = _flatten_cleaned_pngs(detection_input_dir, flat_dir)
             print(f"  Flattened {n_flat} images → {flat_dir}")
@@ -603,12 +605,19 @@ def main() -> None:
 
         if not cleaned_files:
             print(f"  WARNING: No input PNGs found for detection; skipping detection: {flat_dir}")
-        elif args.append_model:
+        else:
+            print(f"\n{'='*70}")
+            print(f"  STEP 5B: Solar panel detection")
+            print(f"{'='*70}")
+            print(f"  Images to analyze: {len(cleaned_files)} (from {flat_dir})")
+            print(f"  Models: {args.append_model.strip().lower() if args.append_model else args.detection_models}")
+
+        if cleaned_files and args.append_model:
             # ── Append-model mode: run only the new model, then merge ──
             append_model = args.append_model.strip().lower()
             tmp_json = detection_json + f".{append_model}_tmp.json"
             cmd = [
-                sys.executable, "/app/detect_solar_panels.py",
+                sys.executable, os.path.join(BASE_DIR, "detect_solar_panels.py"),
                 *cleaned_files,
                 "--models", append_model,
                 "--batch-out", tmp_json,
@@ -628,9 +637,9 @@ def main() -> None:
                 print(f"  WARNING: No existing {detection_json} to merge into; "
                       f"keeping {tmp_json} as-is.")
                 os.rename(tmp_json, detection_json)
-        else:
+        elif cleaned_files:
             cmd = [
-                sys.executable, "/app/detect_solar_panels.py",
+                sys.executable, os.path.join(BASE_DIR, "detect_solar_panels.py"),
                 *cleaned_files,
                 "--models", args.detection_models,
                 "--batch-out", detection_json,

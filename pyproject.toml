@@ -22,4 +22,10 @@ dependencies = [
     "pillow",
     "decord",
     "psutil",
+    "setuptools",
+]
+
+[dependency-groups]
+dev = [
+    "setuptools>=82.0.0",
 ]

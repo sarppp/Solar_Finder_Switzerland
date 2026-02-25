@@ -15,32 +15,32 @@ Features:
 Examples:
 
 A) From JSON with YOLO only
-python3 /app/detect_solar_panels.py \
+python3 detect_solar_panels.py \
   --input-json screenshots_run.json \
   --limit 10 \
   --models yolo \
   --no-viz
 
 B) Multiple image files directly
-python3 /app/detect_solar_panels.py langnau_pv_residential_350/*.png \
+python3 detect_solar_panels.py langnau_pv_residential_350/*.png \
   --models yolo \
-  --out-dir /app \
-  --viz-dir /app/yolo_images \
-  --batch-out /app/solar_detection_langnau_pv_residential_350_batch.json
+  --out-dir . \
+  --viz-dir yolo_images \
+  --batch-out solar_detection_langnau_pv_residential_350_batch.json
 
 C) Single image with all models
-python3 /app/detect_solar_panels.py outputs/Hinterdorfstrasse_13_3550_Langnau_im_Emmental_50m.png \
+python3 detect_solar_panels.py outputs/Hinterdorfstrasse_13_3550_Langnau_im_Emmental_50m.png \
   --models all
 
 D) Use Gemini with aggressive rate limiting (avoid 429 errors)
-python3 /app/detect_solar_panels.py outputs/*.png \
+python3 detect_solar_panels.py outputs/*.png \
   --models gemini \
   --gemini-delay-between 15 \
   --gemini-max-retries 5 \
   --gemini-initial-delay 10
 
 E) Use Ollama with ANY vision model (local, free)
-python3 /app/detect_solar_panels.py outputs/*.png \
+python3 detect_solar_panels.py outputs/*.png \
   --models ollama \
   --ollama-model llava:13b \
   --ollama-host http://localhost:11434
@@ -53,7 +53,7 @@ python3 /app/detect_solar_panels.py outputs/*.png \
 --ollama-model bakllava         # Another option
 
 F) Combine multiple models with smart retry
-python3 /app/detect_solar_panels.py outputs/*.png \
+python3 detect_solar_panels.py outputs/*.png \
   --models yolo,ollama,gemini \
   --gemini-delay-between 20 \
   --gemini-max-retries 5
@@ -69,7 +69,7 @@ Retry Logic:
 - Automatic detection of rate limit vs connection errors
 - Configurable max attempts and delays per model
 
-python3 /app/detect_solar_panels.py streamlit_site/langnau/outputs2/b3597197_B_raustrasse_71l_50m.png --models gemini
+python3 detect_solar_panels.py streamlit_site/langnau/outputs2/b3597197_B_raustrasse_71l_50m.png --models gemini
 """
 
 import os
@@ -82,11 +82,20 @@ import cv2
 import numpy as np
 import time
 import random
+import shutil
+import urllib.request
+import urllib.error
 from functools import wraps
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
+
+# Base directory for bundled assets (e.g., YOLO weights)
+BASE_DIR = Path(__file__).resolve().parent
+DEFAULT_YOLO_WEIGHTS_NAME = "solar_panel_yolov8s-seg.pt"
+DEFAULT_YOLO_WEIGHTS_PATH = BASE_DIR / DEFAULT_YOLO_WEIGHTS_NAME
+YOLO_SOLAR_WEIGHTS_URL = "https://huggingface.co/finloop/yolov8s-seg-solar-panels/resolve/main/best.pt"
 
 # ============================================================================
 # MODEL CONFIGURATION - Change model names and settings here
@@ -95,7 +104,7 @@ load_dotenv()
 MODEL_CONFIG = {
     # YOLO Configuration
     "yolo": {
-        "model_path": "/app/solar_panel_yolov8s-seg.pt",
+        "model_path": str(DEFAULT_YOLO_WEIGHTS_PATH),
         "default_conf": 0.25,
         "default_imgsz": 640,
     },
@@ -213,6 +222,45 @@ def encode_image_base64(image_path):
     """Encode image to base64 for API calls"""
     with open(image_path, "rb") as f:
         return base64.b64encode(f.read()).decode('utf-8')
+
+
+def ensure_yolo_weights(model_path):
+    """Ensure YOLO weights exist locally; download default weights if missing."""
+    path = Path(model_path).expanduser()
+    if path.exists():
+        return str(path)
+
+    default_path = DEFAULT_YOLO_WEIGHTS_PATH.resolve()
+    current_path = path.resolve()
+
+    if current_path != default_path:
+        raise FileNotFoundError(
+            f"YOLO model weights not found at {path}. Provide a valid --yolo-model path or place the file there."
+        )
+
+    print("   ⬇️  Downloading solar-panel YOLOv8 weights (first run)...")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+
+    try:
+        with urllib.request.urlopen(YOLO_SOLAR_WEIGHTS_URL, timeout=90) as resp:
+            data = resp.read()
+        with open(tmp_path, "wb") as f:
+            f.write(data)
+        shutil.move(tmp_path, path)
+        size_mb = len(data) / (1024 * 1024)
+        print(f"   ✅ Downloaded {path.name} ({size_mb:.1f} MB)")
+    except Exception as exc:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise RuntimeError(
+            "Failed to download default YOLO weights. Download manually from "
+            f"{YOLO_SOLAR_WEIGHTS_URL} and place it at {path}."
+        ) from exc
+
+    return str(path)
 
 
 def _ensure_parent_dir(path: str | None) -> None:
@@ -383,7 +431,7 @@ def _filter_by_roi(detections, *, image_wh, roi_xyxy_norm=None, center_window_fr
 
 def detect_yolo(
     image_path,
-    model_path="/app/solar_panel_yolov8s-seg.pt",
+    model_path=os.path.join(BASE_DIR, "solar_panel_yolov8s-seg.pt"),
     *,
     conf=0.25,
     imgsz=640,
@@ -407,7 +455,9 @@ def detect_yolo(
     """
     if not YOLO_AVAILABLE:
         return {"error": "YOLO not available", "has_solar_panel": None, "confidence": 0}
-    
+
+    model_path = ensure_yolo_weights(model_path)
+
     try:
         model = YOLO(model_path)
 
@@ -511,6 +561,8 @@ def detect_yolo(
 def visualize_yolo_solar_panels(image_path, model_path="solar_panel_yolov8s-seg.pt", output_path=None, conf=0.25, alpha=0.4):
     if not YOLO_AVAILABLE:
         return {"error": "YOLO not available", "output_path": None}
+
+    model_path = ensure_yolo_weights(model_path)
 
     img = cv2.imread(image_path)
     if img is None:

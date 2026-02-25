@@ -5,14 +5,14 @@ Get satellite/aerial screenshot of a building from GeoAdmin WMS service
 
 Single address screenshot
 
-python3 /app/get_building_screenshot.py "Hinterdorfstrasse 10 3550 Langnau im Emmental" \
+python3 get_building_screenshot.py "Hinterdorfstrasse 10 3550 Langnau im Emmental" \
   --screenshots-dir outputs \
   --screenshot-size-m 20 \
   --screenshot-width 800 \
   --screenshot-height 800 \
   --reuse-screenshot
 
-python3 /app/get_building_screenshot.py "Kehrstrasse 9 3550 Langnau im Emmental" \
+python3 get_building_screenshot.py "Kehrstrasse 9 3550 Langnau im Emmental" \
   --screenshots-dir outputs \
   --screenshot-size-m 20 \
   --screenshot-width 800 \
@@ -22,7 +22,7 @@ python3 /app/get_building_screenshot.py "Kehrstrasse 9 3550 Langnau im Emmental"
 
 Batch screenshots from your JSON
 This uses coordinates.y/x from the JSON, so it does zero address parsing:
-python3 /app/get_building_screenshot.py \
+python3 get_building_screenshot.py \
   --y 2627021.40 \
   --x 1198617.21 \
   --label "MyBuilding" \
@@ -31,8 +31,8 @@ python3 /app/get_building_screenshot.py \
   --screenshot-width 800 \
   --screenshot-height 800
 
-python3 /app/get_building_screenshot.py \
-  --input-json /app/langnau_pv_clustered.json \
+python3 get_building_screenshot.py \
+  --input-json langnau_pv_clustered.json \
   --screenshots-dir outputs \
   --screenshot-size-m 50 \
   --screenshot-width 800 \
@@ -40,8 +40,8 @@ python3 /app/get_building_screenshot.py \
   --reuse-screenshot
 
 Limit
-python3 /app/get_building_screenshot.py \
-  --input-json /app/langnau_pv_clustered.json \
+python3 get_building_screenshot.py \
+  --input-json langnau_pv_clustered.json \
   --limit 10 \
   --screenshots-dir outputs \
   --screenshot-size-m 50 \

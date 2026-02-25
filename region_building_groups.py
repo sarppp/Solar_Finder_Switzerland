@@ -1,7 +1,7 @@
 """
 
 
-python3 "/app/region_building_groups.py" \
+python3 os.path.join(BASE_DIR, "region_building_groups.py") \
   --region "Langnau im Emmental" \
   --min-roof-area 300 \
   --plant-radius 30 \
@@ -9,7 +9,7 @@ python3 "/app/region_building_groups.py" \
   --pv-only-plants \
   --neighbor-within-m 200 \
   --label-bbox-m 30 \
-  --label-cache /app/streamlit_site/langnau/langnau_labels_cache.json \
+  --label-cache streamlit_site/langnau/langnau_labels_cache.json \
   --tile-size-m 500 \
   --min-tile-size-m 125 \
   --restrict-to-region-label \
@@ -27,16 +27,16 @@ python3 "/app/region_building_groups.py" \
   --label-mode gwr_prefer \
   --include-raw-results \
   --state-file /tmp/langnau_state.json \
-  --out "/app/streamlit_site/langnau/langnau_pv_residential_esid_egrid.json"
+  --out os.path.join(BASE_DIR, "streamlit_site/langnau/langnau_pv_residential_esid_egrid.json")
 
 
   --take-screenshots \
-  --screenshots-dir /app/streamlit_site/payerne2/outputs \
+  --screenshots-dir streamlit_site/payerne2/outputs \
   --screenshot-size-m 50 \
 
 
 ## SINGLE BUILDING
-python3 "/app/region_building_groups.py" \
+python3 os.path.join(BASE_DIR, "region_building_groups.py") \
   --region "Langnau im Emmental" \
   --restrict-to-region-label \
   --min-roof-area 300 \
@@ -1429,11 +1429,11 @@ def main() -> None:
                 label_cache[cache_key] = label
 
         if args.restrict_to_region_label:
-            in_label = bool(label) and (args.region in str(label))
+            in_label = bool(label) and (args.region.lower() in str(label).lower())
             in_gwr_muni = False
             if not in_label and gwr_attrs and args.region:
                 muni = gwr_attrs.get("ggdename")
-                if muni is not None and str(muni) == str(args.region):
+                if muni is not None and str(muni).lower() == str(args.region).lower():
                     in_gwr_muni = True
 
             if not in_label and not in_gwr_muni:
