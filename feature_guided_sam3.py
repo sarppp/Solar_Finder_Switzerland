@@ -98,8 +98,10 @@ def load_feature_models(guide: str, device: torch.device):
     models = {}
     if guide in ("dino", "both"):
         print("  Loading DINOv2 (vit_base_patch14_dinov2)...")
+        #print("  Loading DINOv3 (vit_large_patch16_dinov3)...")
         m = timm.create_model(
             "vit_base_patch14_dinov2.lvd142m",
+            #"vit_large_patch16_dinov3.lvd1689m",
             pretrained=True, num_classes=0, features_only=True,
         )
         m.eval().to(device)
@@ -115,6 +117,7 @@ def load_feature_models(guide: str, device: torch.device):
 
 
 DINO_TRANSFORM = transforms.Compose([
+    # DINOv3 requires 512x512 input or 518 for DINOv2
     transforms.Resize((518, 518)),
     transforms.ToTensor(),
     transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
