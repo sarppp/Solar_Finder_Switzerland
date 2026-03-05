@@ -490,25 +490,33 @@ def main() -> None:
  
     # ── Stage 3: SAM3 segmentation ────────────────────────────────────
     if args.start_stage <= 3 <= args.stop_stage:
-        # Collect screenshot image paths
-        screenshot_pattern = os.path.join(screenshots_dir, "*.png")
+        # Collect screenshot image paths, respecting --limit
+        screenshot_files = sorted(glob.glob(os.path.join(screenshots_dir, "*.png")))
+        if args.limit is not None:
+            screenshot_files = screenshot_files[: int(args.limit)]
 
-        cmd = [
-            sys.executable, os.path.join(BASE_DIR, "feature_guided_sam3.py"),
-            screenshot_pattern,
-            "--guide", args.sam_guide,
-            "--prompt", args.sam_prompt,
-            "--threshold-pct", str(args.sam_threshold_pct),
-            "--confidence", str(args.sam_confidence),
-            "--device", args.sam_device,
-            "--viz-dir", sam_viz_dir,
-            "--mask-dir", sam_mask_dir,
-            "--metadata-out", sam_results_json,
-        ]
- 
-        rc = _run(cmd, "3/5  SAM3 segmentation", args.dry_run)
-        if rc != 0 and not args.dry_run:
-            sys.exit(rc)
+        if not screenshot_files:
+            print("  WARNING: No screenshot files found, skipping stage 3")
+        else:
+            print(f"  SAM3 will process {len(screenshot_files)} image(s)")
+
+        if screenshot_files:
+            cmd = [
+                sys.executable, os.path.join(BASE_DIR, "feature_guided_sam3.py"),
+                *screenshot_files,
+                "--guide", args.sam_guide,
+                "--prompt", args.sam_prompt,
+                "--threshold-pct", str(args.sam_threshold_pct),
+                "--confidence", str(args.sam_confidence),
+                "--device", args.sam_device,
+                "--viz-dir", sam_viz_dir,
+                "--mask-dir", sam_mask_dir,
+                "--metadata-out", sam_results_json,
+            ]
+
+            rc = _run(cmd, "3/5  SAM3 segmentation", args.dry_run)
+            if rc != 0 and not args.dry_run:
+                sys.exit(rc)
 
         # Cleanup SAM outputs to keep best only (remove ranked extras)
         if args.sam_keep_best_only and not args.dry_run:

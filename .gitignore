@@ -86,3 +86,4 @@ pytest.cache/
 
 # Streamlit site folders (exclude subdirectories but keep main files)
 streamlit_site/*/
+tests/*
