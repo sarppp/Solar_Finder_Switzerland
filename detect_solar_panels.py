@@ -45,6 +45,13 @@ python3 detect_solar_panels.py outputs/*.png \
   --ollama-model llava:13b \
   --ollama-host http://localhost:11434
 
+  uv run python run_pipeline.py --region "Langnau im Emmental" \
+    --output-dir streamlit_site/langnau_run_2025_04 \
+    --start-stage 5 --stop-stage 5 \
+    --detection-input-dir streamlit_site/langnau_run_2025_04/cleaned_flat \
+    --append-model ollama
+
+
 # Try different Ollama models:
 --ollama-model llama3.2-vision  # Meta's latest
 --ollama-model llava            # Popular 7B model
