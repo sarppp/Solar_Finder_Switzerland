@@ -125,7 +125,7 @@ MODEL_CONFIG = {
     
     # Ollama Configuration
     "ollama": {
-        "default_model": "llama3.2-vision",
+        "default_model": "qwen3-vl:4b",
         "default_host": "http://localhost:11434",
         "default_max_retries": 3,
         "default_initial_delay": 0.0,
@@ -807,7 +807,7 @@ Respond in JSON format:
         }
 
 
-def detect_ollama(image_path, model="llama3.2-vision", host="http://localhost:11434", max_retries=3, initial_delay=2.0):
+def detect_ollama(image_path, model="qwen3-vl:4b", host="http://localhost:11434", max_retries=3, initial_delay=2.0):
     """
     Ollama local model detection - works with ANY vision or multimodal model
     

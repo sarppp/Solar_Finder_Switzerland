@@ -24,10 +24,10 @@ import streamlit as st
 #DETECTIONS_DIRS = []
 
 PREVIEW_LIMIT = 100
-PREVIEW_JSON = "streamlit_site/langnau_run_2025_03/langnau_im_emmental_buildings.json"
-SCREENSHOT_DIRS = ["streamlit_site/langnau_run_2025_03/screenshots"]
-DETECTIONS_BATCH_JSON = "streamlit_site/langnau_run_2025_03/langnau_im_emmental_detections.json"
-YOLO_VIZ_DIRS = ["streamlit_site/langnau_run_2025_03/detection_viz"]
+PREVIEW_JSON = "streamlit_site/langnau_run_2025_04/langnau_im_emmental_buildings.json"
+SCREENSHOT_DIRS = ["streamlit_site/langnau_run_2025_04/screenshots"]
+DETECTIONS_BATCH_JSON = "streamlit_site/langnau_run_2025_04/langnau_im_emmental_detections.json"
+YOLO_VIZ_DIRS = ["streamlit_site/langnau_run_2025_04/detection_viz"]
 DETECTIONS_DIRS = []
 
 

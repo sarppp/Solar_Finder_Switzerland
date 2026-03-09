@@ -2,10 +2,10 @@
 Export buildings and detections to Excel.
 
 Usage:
-python streamlit_site/export_to_excel.py \
-    --buildings streamlit_site/payerne/payerne_buildings.json \
-    --detections streamlit_site/payerne/payerne_detections.json \
-    --out streamlit_site/payerne/payerne_export.xlsx
+uv run python export_to_excel.py \
+    --buildings streamlit_site/langnau_run_2025_04/langnau_im_emmental_buildings.json \
+    --detections streamlit_site/langnau_run_2025_04/langnau_im_emmental_detections.json \
+    --out streamlit_site/langnau_run_2025_04/langnau_im_emmental_export.xlsx
 """
 
 import argparse
