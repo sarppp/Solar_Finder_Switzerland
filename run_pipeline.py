@@ -33,8 +33,7 @@ python3 run_pipeline.py --region "Langnau im Emmental" --dry-run
 python3 run_pipeline.py --region "Payerne" \\
   --min-roof-area 200 \\
   --screenshot-size-m 40 \\
-  --detection-models yolo,gemini \\
-  --sam-guide dino
+  --detection-models yolo,gemini
 
 python3 run_pipeline.py --region "Langnau im Emmental" \
   --start-stage 1 \
@@ -58,12 +57,9 @@ python3 run_pipeline.py --region "Langnau im Emmental" \
   --screenshot-width 800 \
   --screenshot-height 800 \
   --reuse-screenshot \
-  --sam-guide dino \
   --sam-prompt "the main building" \
-  --sam-threshold-pct 70 \
-  --sam-confidence 0.3 \
+  --sam-confidence 0.0 \
   --sam-device cuda \
-  --sam-keep-best-only \
   --crop-background transparent \
   --crop-padding 0 \
   --detection-models yolo \
@@ -94,12 +90,9 @@ uv run python3 run_pipeline.py \
   --screenshot-size-m 50.0 \
   --screenshot-width 800 \
   --screenshot-height 800 \
-  --sam-guide dino \
   --sam-prompt "the main building" \
-  --sam-threshold-pct 70 \
-  --sam-confidence 0.3 \
+  --sam-confidence 0.0 \
   --sam-device cuda \
-  --sam-keep-best-only \
   --crop-background transparent \
   --crop-padding 0 \
   --detection-models yolo \
@@ -112,10 +105,10 @@ python run_pipeline.py \
   --append-model gemini \
   --gemini-delay-between 2.0
 
-python run_pipeline.py --region "Langnau im Emmental" \  \                  
-  --start-stage 5 --stop-stage 5 \ \
-  --detection-input-dir streamlit_site/langnau_im_emmental/cleaned_flat \ \
-  --append-model gemini \ \
+python run_pipeline.py --region "Langnau im Emmental" \           
+  --start-stage 5 --stop-stage 5 \
+  --detection-input-dir streamlit_site/langnau_run_2025_03/cleaned_flat \
+  --append-model gemini \
   --gemini-delay-between 3
 """
  
@@ -307,15 +300,11 @@ def build_parser() -> argparse.ArgumentParser:
  
     # ── Stage 3: feature_guided_sam3 ───────────────────────────────────
     s3 = p.add_argument_group("Stage 3 – SAM3 segmentation (feature_guided_sam3.py)")
-    s3.add_argument("--sam-guide", default="dino", choices=["dino", "convnext", "both"],
-                    help="Feature extractor for SAM3 guidance (default: dino)")
     s3.add_argument("--sam-prompt", default="the main building",
                     help="Text prompt for SAM3")
-    s3.add_argument("--sam-threshold-pct", type=int, default=70)
-    s3.add_argument("--sam-confidence", type=float, default=0.3)
+    s3.add_argument("--sam-confidence", type=float, default=0.0,
+                    help="SAM3 confidence threshold (0.0 = keep all candidates)")
     s3.add_argument("--sam-device", default="cuda", choices=["cuda", "cpu"])
-    s3.add_argument("--sam-keep-best-only", action="store_true", default=True,
-                    help="After SAM3, keep only the best guided viz/mask and delete ranked extras (default: True)")
 
 
     # ── Stage 4: crop_and_clean_image ──────────────────────────────────
@@ -504,9 +493,7 @@ def main() -> None:
             cmd = [
                 sys.executable, os.path.join(BASE_DIR, "feature_guided_sam3.py"),
                 *screenshot_files,
-                "--guide", args.sam_guide,
                 "--prompt", args.sam_prompt,
-                "--threshold-pct", str(args.sam_threshold_pct),
                 "--confidence", str(args.sam_confidence),
                 "--device", args.sam_device,
                 "--viz-dir", sam_viz_dir,
@@ -518,25 +505,6 @@ def main() -> None:
             if rc != 0 and not args.dry_run:
                 sys.exit(rc)
 
-        # Cleanup SAM outputs to keep best only (remove ranked extras)
-        if args.sam_keep_best_only and not args.dry_run:
-            removed = 0
-            patterns = [
-                os.path.join(sam_viz_dir, "*_rank*.png"),
-                os.path.join(sam_mask_dir, "*_rank*.png"),
-                os.path.join(sam_mask_dir, "*_rank*.json"),
-                os.path.join(sam_viz_dir, "*_rank*.json"),
-            ]
-            for pat in patterns:
-                for f in glob.glob(pat):
-                    try:
-                        os.remove(f)
-                        removed += 1
-                    except Exception:
-                        pass
-            if removed:
-                print(f"  SAM cleanup: removed {removed} ranked files, keeping best-guided outputs")
- 
     # ── Stage 4: Crop & clean ─────────────────────────────────────────
     if args.start_stage <= 4 <= args.stop_stage:
         print(f"\n{'='*70}")
@@ -555,9 +523,9 @@ def main() -> None:
                 failed = 0
                 for mask_path in mask_files:
                     mask_name = os.path.basename(mask_path)
-                    # Extract original filename: remove _guided_<method>_mask.png
-                    # Pattern: <original_stem>_guided_<method>_mask.png
-                    m = re.match(r"^(.+?)_guided_\w+_mask\.png$", mask_name)
+                    # Extract original filename: remove _mask.png suffix
+                    # Pattern: <original_stem>_mask.png
+                    m = re.match(r"^(.+?)_mask\.png$", mask_name)
                     if not m:
                         continue
                     original_stem = m.group(1)
