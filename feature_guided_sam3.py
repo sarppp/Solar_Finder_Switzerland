@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 """SAM3 building segmentation guided by SAM3's own layer-23 features.
 
-Scoring: combined = SAM3_score × pc1_coverage
-  SAM3_score   — language model confidence for "the main building"
-  pc1_coverage — fraction of mask pixels with L23 PC1 above image median
+Scoring: combined = SAM3_score × pc1_recall
+  SAM3_score — language model confidence for "the main building"
+  pc1_recall — |mask ∩ hot| / |hot|  where hot = L23 PC1 above image median
+
+  Recall rewards masks that cover the full building hot-zone.
+  Precision (fraction of mask pixels that are hot) saturates at 1.0 when any
+  mask is fully inside the hot zone — it cannot distinguish a partial wing
+  from the whole building. Recall keeps growing until the mask covers all of
+  the semantically hot region, selecting the most complete footprint.
 
 Why it works: SAM3 layer-23 PC1 explains 56.8% of token variance — the
 dominant semantic axis separates building from background. Multiplying by
@@ -114,8 +120,18 @@ def pick_by_combined(masks: List[np.ndarray], sam3_scores: List[float],
                      pc1_map: np.ndarray, orig_h: int, orig_w: int,
                      min_area: float = 0.02, max_area: float = 0.90,
                      ) -> Tuple[int, List[float], List[float]]:
-    """Score = SAM3_score × fraction of mask pixels with PC1 > image median."""
-    pc1_median = float(np.median(pc1_map))
+    """Score = SAM3_score × pc1_recall
+    pc1_recall = |mask ∩ hot| / |hot|   (hot = PC1 above image median)
+
+    Recall rewards masks that COVER more of the semantically hot region.
+    Precision (old formula) saturates at 1.0 for any mask fully inside the
+    hot zone, so it cannot distinguish a partial wing from the whole building.
+    Recall grows with mask area until the mask covers the full hot zone,
+    naturally selecting the most complete building footprint.
+    """
+    pc1_median  = float(np.median(pc1_map))
+    hot         = pc1_map > pc1_median
+    total_hot   = float(hot.sum()) + 1e-8
     combined, coverages = [], []
     for i, mask in enumerate(masks):
         m = mask if mask.shape[:2] == (orig_h, orig_w) else cv2.resize(
@@ -125,9 +141,9 @@ def pick_by_combined(masks: List[np.ndarray], sam3_scores: List[float],
             combined.append(-np.inf)
             coverages.append(float("nan"))
             continue
-        cov = float((pc1_map[m.astype(bool)] > pc1_median).mean())
-        coverages.append(cov)
-        combined.append(sam3_scores[i] * cov)
+        recall = float((hot & m.astype(bool)).sum()) / total_hot
+        coverages.append(recall)
+        combined.append(sam3_scores[i] * recall)
     return int(np.argmax(combined)), combined, coverages
 
 
