@@ -57,6 +57,41 @@ import sys
 from PIL import Image
 from io import BytesIO
 
+def get_image_metadata(y: float, x: float) -> dict:
+    """Query swisstopo for the flight year and resolution of the aerial image at this coordinate."""
+    try:
+        resp = requests.get(
+            "https://api3.geo.admin.ch/rest/services/ech/MapServer/identify",
+            params={
+                "geometryType": "esriGeometryPoint",
+                "geometry": f"{y},{x}",
+                "layers": "all:ch.swisstopo.swissimage-product.metadata",
+                "mapExtent": f"{y-50},{x-50},{y+50},{x+50}",
+                "imageDisplay": "100,100,96",
+                "tolerance": "50",
+                "sr": "2056",
+                "returnGeometry": "false",
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        results = resp.json().get("results", [])
+        # Pick the result with the highest flightyear (most current)
+        if not results:
+            return {}
+        best = max(results, key=lambda r: r.get("attributes", {}).get("flightyear", 0))
+        attrs = best.get("attributes", {})
+        gsd = attrs.get("gsd", "")
+        gsd_cm = int(gsd.replace(" cm", "")) if "cm" in str(gsd) else None
+        return {
+            "flight_year": attrs.get("flightyear"),
+            "published_year": attrs.get("bgdi_flugjahr"),
+            "resolution_cm": gsd_cm,
+        }
+    except Exception:
+        return {}
+
+
 def geocode(address):
     """Convert address to LV95 coordinates"""
     resp = requests.get("https://api3.geo.admin.ch/rest/services/ech/SearchServer", 
@@ -136,8 +171,9 @@ def _save_screenshot(
     out_path: str,
     reuse: bool,
 ) -> dict:
+    image_meta = get_image_metadata(y, x)
     if reuse and os.path.exists(out_path):
-        return {"screenshot": out_path, "reused": True}
+        return {"screenshot": out_path, "reused": True, "image": image_meta}
     try:
         image_data = get_screenshot(float(y), float(x), float(radius_m), int(width), int(height))
         with open(out_path, "wb") as f:
@@ -148,9 +184,10 @@ def _save_screenshot(
             "width_px": int(img.size[0]),
             "height_px": int(img.size[1]),
             "coverage_m": float(radius_m) * 2.0,
+            "image": image_meta,
         }
     except Exception as e:
-        return {"error": str(e), "screenshot": out_path}
+        return {"error": str(e), "screenshot": out_path, "image": image_meta}
 
 
 def _iter_items_from_results_json(path: str):

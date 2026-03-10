@@ -64,6 +64,40 @@ def geocode(address: str) -> tuple[float, float]:
     return y, x
 
 
+def get_image_metadata(y: float, x: float) -> dict:
+    """Query swisstopo for the flight year and resolution of the aerial image at this coordinate."""
+    try:
+        resp = requests.get(
+            f"{GEOADMIN_BASE}/MapServer/identify",
+            params={
+                "geometryType": "esriGeometryPoint",
+                "geometry": f"{y},{x}",
+                "layers": "all:ch.swisstopo.swissimage-product.metadata",
+                "mapExtent": f"{y-50},{x-50},{y+50},{x+50}",
+                "imageDisplay": "100,100,96",
+                "tolerance": "50",
+                "sr": "2056",
+                "returnGeometry": "false",
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        results = resp.json().get("results", [])
+        if not results:
+            return {}
+        best = max(results, key=lambda r: r.get("attributes", {}).get("flightyear", 0))
+        attrs = best.get("attributes", {})
+        gsd = attrs.get("gsd", "")
+        gsd_cm = int(gsd.replace(" cm", "")) if "cm" in str(gsd) else None
+        return {
+            "flight_year": attrs.get("flightyear"),
+            "published_year": attrs.get("bgdi_flugjahr"),
+            "resolution_cm": gsd_cm,
+        }
+    except Exception:
+        return {}
+
+
 def get_roof_facet(addr_y: float, addr_x: float) -> dict | None:
     """Point-query the solar suitability layer to get the roof facet at a coordinate."""
     resp = requests.get(f"{GEOADMIN_BASE}/MapServer/identify", params={
@@ -158,6 +192,7 @@ def process_one(y: float, x: float, label: str, output_dir: str,
     sat = wms_image("ch.swisstopo.swissimage", bbox, px_size, px_size)
     sat.convert("RGB").save(sat_path)
 
+    image_meta = get_image_metadata(y, x)
     print(f"  Saved: {sat_path}  ({actual_size_m}m × {actual_size_m}m  "
           f"bid={attrs.get('building_id')} klasse={attrs.get('klasse')})",
           file=sys.stderr)
@@ -170,6 +205,7 @@ def process_one(y: float, x: float, label: str, output_dir: str,
         "roof_area_m2": float(attrs.get("flaeche") or 0),
         "crop_size_m": actual_size_m,
         "coordinates": {"y": y, "x": x},
+        "image": image_meta,
     }
 
     # Optional overlay output (standalone use only)
