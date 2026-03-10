@@ -33,10 +33,13 @@ Usage (batch from pipeline buildings JSON):
 """
 
 import argparse
+import asyncio
 import json
 import os
 import re
 import sys
+import time
+import httpx
 import requests
 from io import BytesIO
 from PIL import Image
@@ -113,6 +116,74 @@ def get_roof_facet(addr_y: float, addr_x: float) -> dict | None:
     resp.raise_for_status()
     results = resp.json().get("results", [])
     return results[0] if results else None
+
+
+async def get_image_metadata_async(client: httpx.AsyncClient, y: float, x: float) -> dict:
+    try:
+        resp = await client.get(
+            f"{GEOADMIN_BASE}/MapServer/identify",
+            params={
+                "geometryType": "esriGeometryPoint",
+                "geometry": f"{y},{x}",
+                "layers": "all:ch.swisstopo.swissimage-product.metadata",
+                "mapExtent": f"{y-50},{x-50},{y+50},{x+50}",
+                "imageDisplay": "100,100,96",
+                "tolerance": "50",
+                "sr": "2056",
+                "returnGeometry": "false",
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        results = resp.json().get("results", [])
+        if not results:
+            return {}
+        best = max(results, key=lambda r: r.get("attributes", {}).get("flightyear", 0))
+        attrs = best.get("attributes", {})
+        gsd = attrs.get("gsd", "")
+        gsd_cm = int(gsd.replace(" cm", "")) if "cm" in str(gsd) else None
+        return {
+            "flight_year": attrs.get("flightyear"),
+            "published_year": attrs.get("bgdi_flugjahr"),
+            "resolution_cm": gsd_cm,
+        }
+    except Exception:
+        return {}
+
+
+async def get_roof_facet_async(client: httpx.AsyncClient, addr_y: float, addr_x: float) -> dict | None:
+    resp = await client.get(
+        f"{GEOADMIN_BASE}/MapServer/identify",
+        params={
+            "geometryType": "esriGeometryPoint",
+            "geometry": f"{addr_y},{addr_x}",
+            "layers": "all:ch.bfe.solarenergie-eignung-daecher",
+            "mapExtent": f"{addr_y-50},{addr_x-50},{addr_y+50},{addr_x+50}",
+            "imageDisplay": "1000,1000,96",
+            "tolerance": "10",
+            "returnGeometry": "true",
+            "sr": "2056",
+        },
+        timeout=30,
+    )
+    resp.raise_for_status()
+    results = resp.json().get("results", [])
+    return results[0] if results else None
+
+
+async def wms_image_async(client: httpx.AsyncClient, layers: str, bbox: str,
+                          width: int, height: int, transparent: bool = False) -> Image.Image:
+    params = {
+        "SERVICE": "WMS", "VERSION": "1.3.0", "REQUEST": "GetMap",
+        "LAYERS": layers, "CRS": "EPSG:2056",
+        "BBOX": bbox, "WIDTH": str(width), "HEIGHT": str(height),
+        "FORMAT": "image/png",
+    }
+    if transparent:
+        params["TRANSPARENT"] = "TRUE"
+    resp = await client.get(WMS_URL, params=params, timeout=60)
+    resp.raise_for_status()
+    return Image.open(BytesIO(resp.content)).convert("RGBA")
 
 
 def facet_bbox(facet: dict) -> tuple[float, float, float, float]:
@@ -219,6 +290,105 @@ def process_one(y: float, x: float, label: str, output_dir: str,
     return result
 
 
+async def process_one_async(
+    client: httpx.AsyncClient,
+    sem: asyncio.Semaphore,
+    y: float, x: float, label: str, output_dir: str,
+    size_m: float | None, padding: float, px_size: int,
+    with_overlay: bool = False,
+) -> dict:
+    """Async version of process_one. Fires facet + metadata concurrently,
+    then satellite (+ optional overlay) concurrently once the bbox is known."""
+    async with sem:
+        # Facet and metadata are independent — fire both at once.
+        facet, image_meta = await asyncio.gather(
+            get_roof_facet_async(client, y, x),
+            get_image_metadata_async(client, y, x),
+        )
+
+        if not facet:
+            print(f"  WARNING: no solar facet at y={y:.1f} x={x:.1f}, skipping", file=sys.stderr)
+            return {"label": label, "error": "no_facet"}
+
+        attrs = facet["attributes"]
+        min_y, min_x, max_y, max_x = facet_bbox(facet)
+        facet_cy = (min_y + max_y) / 2
+        facet_cx = (min_x + max_x) / 2
+
+        if size_m is not None:
+            half = size_m / 2.0
+            b0, b1, b2, b3 = facet_cy - half, facet_cx - half, facet_cy + half, facet_cx + half
+        else:
+            b0, b1, b2, b3 = square_crop(min_y, min_x, max_y, max_x, padding)
+
+        actual_size_m = round(b2 - b0)
+        bbox = f"{b0},{b1},{b2},{b3}"
+        stem = _sanitize_filename(label)
+        sat_path = os.path.join(output_dir, f"{stem}_{actual_size_m}m.png")
+
+        # Satellite + optional overlay — fire concurrently since bbox is now fixed.
+        if with_overlay:
+            sat_img, solar_img = await asyncio.gather(
+                wms_image_async(client, "ch.swisstopo.swissimage", bbox, px_size, px_size),
+                wms_image_async(client, "ch.bfe.solarenergie-eignung-daecher", bbox, px_size, px_size, transparent=True),
+            )
+        else:
+            sat_img = await wms_image_async(client, "ch.swisstopo.swissimage", bbox, px_size, px_size)
+            solar_img = None
+
+        sat_img.convert("RGB").save(sat_path)
+        print(f"  Saved: {sat_path}  ({actual_size_m}m × {actual_size_m}m  "
+              f"bid={attrs.get('building_id')} klasse={attrs.get('klasse')})", file=sys.stderr)
+
+        result = {
+            "label": label,
+            "screenshot": sat_path,
+            "building_id": attrs.get("building_id"),
+            "klasse": attrs.get("klasse"),
+            "roof_area_m2": float(attrs.get("flaeche") or 0),
+            "crop_size_m": actual_size_m,
+            "coordinates": {"y": y, "x": x},
+            "image": image_meta,
+        }
+
+        if with_overlay and solar_img is not None:
+            overlay_path = os.path.join(output_dir, f"{stem}_overlay.png")
+            Image.alpha_composite(sat_img, solar_img).convert("RGB").save(overlay_path)
+            print(f"  Overlay: {overlay_path}", file=sys.stderr)
+            result["overlay"] = overlay_path
+
+        return result
+
+
+async def _run_batch(buildings: list, args, out: dict) -> None:
+    """Run all buildings concurrently, capped at 5 in-flight at a time."""
+    sem = asyncio.Semaphore(5)
+    total = len(buildings)
+
+    async def _process(i: int, b: dict):
+        coords = b.get("coordinates") or {}
+        y = coords.get("y")
+        x = coords.get("x")
+        bid = b.get("building_id", i)
+        if y is None or x is None:
+            return None
+        label = b.get("label") or f"b{bid}"
+        stem_label = f"b{bid}_{label}" if bid is not None else str(label)
+        print(f"[{i}/{total}] building_id={bid}  label={str(label)[:40]!r}", file=sys.stderr)
+        result = await process_one_async(client, sem, float(y), float(x), stem_label,
+                                         args.output_dir, args.size_m, args.padding,
+                                         args.size, args.with_overlay)
+        result["building_id"] = bid
+        return result
+
+    async with httpx.AsyncClient() as client:
+        results = await asyncio.gather(*[_process(i, b) for i, b in enumerate(buildings, 1)])
+
+    for r in results:
+        if r is not None:
+            out["results"].append(r)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Satellite screenshot centered on roof-facet centroid (optionally with WMS overlay)."
@@ -268,8 +438,10 @@ def main():
     if has_coord:
         label = args.label or f"y{args.y:.0f}_x{args.x:.0f}"
         print(f"Coordinate mode: y={args.y}, x={args.x}  label={label!r}", file=sys.stderr)
+        t0 = time.perf_counter()
         result = process_one(args.y, args.x, label, args.output_dir,
                              args.size_m, args.padding, args.size, args.with_overlay)
+        print(f"  Elapsed: {time.perf_counter() - t0:.1f}s", file=sys.stderr)
         out["results"].append(result)
         print(json.dumps(out, indent=2, ensure_ascii=False))
         return
@@ -279,8 +451,10 @@ def main():
         print(f"Geocoding: {args.address!r}", file=sys.stderr)
         y, x = geocode(args.address)
         print(f"  LV95: y={y:.2f}, x={x:.2f}", file=sys.stderr)
+        t0 = time.perf_counter()
         result = process_one(y, x, args.address, args.output_dir,
                              args.size_m, args.padding, args.size, args.with_overlay)
+        print(f"  Elapsed: {time.perf_counter() - t0:.1f}s", file=sys.stderr)
         out["results"].append(result)
         print(json.dumps(out, indent=2, ensure_ascii=False))
         return
@@ -296,24 +470,15 @@ def main():
         buildings = buildings[: args.limit]
 
     print(f"Batch mode: {len(buildings)} buildings from {args.input_json}", file=sys.stderr)
-    for i, b in enumerate(buildings, 1):
-        coords = b.get("coordinates") or {}
-        y = coords.get("y")
-        x = coords.get("x")
-        if y is None or x is None:
-            continue
-        bid = b.get("building_id", i)
-        label = b.get("label") or f"b{bid}"
-        stem_label = f"b{bid}_{label}" if bid is not None else str(label)
-        print(f"[{i}/{len(buildings)}] building_id={bid}  label={str(label)[:40]!r}", file=sys.stderr)
-        result = process_one(float(y), float(x), stem_label,
-                             args.output_dir, args.size_m, args.padding, args.size,
-                             args.with_overlay)
-        result["building_id"] = bid
-        out["results"].append(result)
+    t0 = time.perf_counter()
+    asyncio.run(_run_batch(buildings, args, out))
+    elapsed = time.perf_counter() - t0
+    h, rem = divmod(int(elapsed), 3600)
+    m, s = divmod(rem, 60)
+    elapsed_str = (f"{h}h {m}m {s}s" if h else f"{m}m {s}s" if m else f"{elapsed:.1f}s")
 
     n_ok = sum(1 for r in out["results"] if "error" not in r)
-    print(f"\nDone: {n_ok}/{len(out['results'])} screenshots saved", file=sys.stderr)
+    print(f"\nDone: {n_ok}/{len(out['results'])} screenshots saved  |  Elapsed: {elapsed_str}", file=sys.stderr)
     print(json.dumps(out, indent=2, ensure_ascii=False))
 
 
