@@ -1,26 +1,32 @@
 #!/usr/bin/env python3
 """SAM3 building segmentation guided by SAM3's own layer-23 features.
 
-Scoring: combined = SAM3_score × pc1_recall
-  SAM3_score — language model confidence for "the main building"
-  pc1_recall — |mask ∩ hot| / |hot|  where hot = L23 PC1 above image median
+Scoring: combined = SAM3_score × pc1_recall × center_score
+  SAM3_score   — language model confidence for "the main building"
+  pc1_recall   — |mask ∩ hot| / |hot|  where hot = L23 PC1 above image median
+  center_score — Gaussian proximity to image centre (domain prior: every image
+                 is captured centred on the target building)
 
-  Recall rewards masks that cover the full building hot-zone.
-  Precision (fraction of mask pixels that are hot) saturates at 1.0 when any
-  mask is fully inside the hot zone — it cannot distinguish a partial wing
-  from the whole building. Recall keeps growing until the mask covers all of
-  the semantically hot region, selecting the most complete footprint.
+  pc1_recall rewards masks that cover the full building hot-zone; it keeps
+  growing until the mask covers all semantically hot pixels, selecting the most
+  complete footprint.
+
+  center_score exploits the hard pipeline guarantee: the target building is
+  always near the centre of the aerial crop.  A mask whose centroid is far from
+  the image centre is penalised regardless of SAM3 or PC1 signal — this
+  prevents bright off-centre neighbours from winning at canton scale.
 
 Why it works: SAM3 layer-23 PC1 explains 56.8% of token variance — the
 dominant semantic axis separates building from background. Multiplying by
 the SAM3 score kills tiny fragments (score ≈ 0) and large wrong-region
-masks (coverage ≈ 0), rewarding the correct building footprint.
+masks (coverage ≈ 0). Center score eliminates geometrically off-centre
+candidates even when PC1 hot region is scattered or degenerate.
 
 PC1 fallback: when max PC1 recall across all candidates < PC1_FALLBACK_RECALL,
-the PC1 signal is degenerate (e.g. road/edge artefacts dominate). In that case
-we fall back to pure SAM3 score ordering.
+the PC1 signal is degenerate (e.g. scattered car-roof reflections). In that
+case combined = SAM3_score × center_score (center prior still applied).
 
-No external models. No hand-tuned thresholds. Both signals from SAM3.
+No external models. No hand-tuned thresholds. All signals from SAM3 + geometry.
 
 Usage:
   uv run python feature_guided_sam3.py image.png
@@ -62,7 +68,10 @@ SAM3_TRANSFORM = transforms.Compose([
 GRID = 72   # SAM3 ViT-H: 1008 / 14 = 72 patches per side
 L23  = 23   # peak semantic layer
 
-PC1_FALLBACK_RECALL = 0.15   # if max recall < this, PC1 is degenerate → use SAM3 score
+PC1_FALLBACK_RECALL = 0.15   # if max recall < this, PC1 is degenerate → use SAM3×center
+CENTER_SIGMA        = 0.25   # Gaussian σ in units of half-diagonal (0=centre, 1=corner)
+                             # σ=0.25 → score drops to ~0.6 at 25% of half-diag from centre
+                             #           score drops to ~0.14 at 50% (strongly off-centre)
 
 
 def parse_args() -> argparse.Namespace:
@@ -167,47 +176,72 @@ def run_sam3(processor: Sam3Processor, image: Image.Image,
 # Scoring / picking
 # ---------------------------------------------------------------------------
 
+def mask_center_score(mask: np.ndarray, orig_h: int, orig_w: int) -> float:
+    """Gaussian proximity score centred on the image centre.
+
+    Exploits the domain guarantee: every aerial crop is centred on the
+    target building.  A mask whose centroid drifts to the edge of the image
+    is almost certainly a neighbour, not the target.
+
+    Returns 1.0 at image centre, approaches 0 at the corners.
+    Uses CENTER_SIGMA (in units of half-diagonal) to control sharpness.
+    """
+    m = mask.astype(bool)
+    if m.sum() == 0:
+        return 0.0
+    ys, xs = np.where(m)
+    cy = ys.mean() / orig_h   # normalised [0, 1]
+    cx = xs.mean() / orig_w
+    # half-diagonal = distance from centre to corner in normalised coords
+    half_diag = np.sqrt(0.5)  # = sqrt(0.5² + 0.5²)
+    dist = np.sqrt((cy - 0.5) ** 2 + (cx - 0.5) ** 2) / half_diag
+    return float(np.exp(-0.5 * (dist / CENTER_SIGMA) ** 2))
+
+
 def pick_by_combined(masks: List[np.ndarray], sam3_scores: List[float],
                      pc1_map: np.ndarray, orig_h: int, orig_w: int,
                      min_area: float = 0.02, max_area: float = 0.90,
-                     ) -> Tuple[int, List[float], List[float], bool]:
-    """Score = SAM3_score × pc1_recall
-    pc1_recall = |mask ∩ hot| / |hot|   (hot = PC1 above image median)
+                     ) -> Tuple[int, List[float], List[float], List[float], bool]:
+    """Score = SAM3_score × pc1_recall × center_score
+
+    pc1_recall   = |mask ∩ hot| / |hot|   (hot = PC1 above image median)
+    center_score = Gaussian proximity to image centre (see mask_center_score)
 
     Recall rewards masks that COVER more of the semantically hot region.
-    Precision (old formula) saturates at 1.0 for any mask fully inside the
-    hot zone, so it cannot distinguish a partial wing from the whole building.
-    Recall grows with mask area until the mask covers the full hot zone,
-    naturally selecting the most complete building footprint.
+    Center score penalises off-centre neighbours even when PC1 is confused
+    by scattered bright surfaces (cars, roofs, etc.).
 
-    Returns (best_idx, combined_scores, coverages, pc1_fallback).
+    Returns (best_idx, combined_scores, coverages, center_scores, pc1_fallback).
     pc1_fallback=True when max recall < PC1_FALLBACK_RECALL — in that case
-    best_idx is chosen by pure SAM3 score instead.
+    best_idx is chosen by SAM3_score × center_score (PC1 dropped, center kept).
     """
     pc1_median  = float(np.median(pc1_map))
     hot         = pc1_map > pc1_median
     total_hot   = float(hot.sum()) + 1e-8
-    combined, coverages = [], []
+    combined, coverages, center_scores = [], [], []
     for i, mask in enumerate(masks):
         m = mask if mask.shape[:2] == (orig_h, orig_w) else cv2.resize(
             mask, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
         area = float(m.mean())
+        center = mask_center_score(m, orig_h, orig_w)
+        center_scores.append(center)
         if area < min_area or area > max_area:
             combined.append(-np.inf)
             coverages.append(float("nan"))
             continue
         recall = float((hot & m.astype(bool)).sum()) / total_hot
         coverages.append(recall)
-        combined.append(sam3_scores[i] * recall)
+        combined.append(sam3_scores[i] * recall * center)
 
     max_recall = max((r for r in coverages if np.isfinite(r)), default=0.0)
     if max_recall < PC1_FALLBACK_RECALL:
-        # PC1 is degenerate — fall back to pure SAM3 score
+        # PC1 is degenerate — fall back to SAM3_score × center_score
         valid = [i for i, c in enumerate(combined) if np.isfinite(c)]
-        best_idx = max(valid, key=lambda i: sam3_scores[i]) if valid else 0
-        return best_idx, combined, coverages, True
+        best_idx = (max(valid, key=lambda i: sam3_scores[i] * center_scores[i])
+                    if valid else 0)
+        return best_idx, combined, coverages, center_scores, True
 
-    return int(np.argmax(combined)), combined, coverages, False
+    return int(np.argmax(combined)), combined, coverages, center_scores, False
 
 
 # ---------------------------------------------------------------------------
@@ -270,73 +304,108 @@ def save_debug_pc1(debug_dir: Path, stem: str,
                    bgr: np.ndarray, pc1_map: np.ndarray,
                    masks: List[np.ndarray], sam3_scores: List[float],
                    combined: List[float], coverages: List[float],
+                   center_scores: List[float],
                    best_idx: int, pc1_fallback: bool,
                    top_k: int = 5) -> None:
-    """Save PC1 heatmap + candidate grid to debug_dir/stem_debug.png."""
+    """Save combined debug image: comparison row + PC1 heatmap + candidate grid.
+
+    Layout:
+      Row 1 (THUMB height each): [PC1 heatmap] | [original] | [SAM3 pick] | [guided pick]
+      Row 2 (THUMB height each): top-k candidates by combined score
+    """
     debug_dir.mkdir(parents=True, exist_ok=True)
     orig_h, orig_w = bgr.shape[:2]
+    THUMB = 340   # thumbnail height for all panels
 
-    # --- PC1 heatmap ---
-    pc1_norm = cv2.normalize(pc1_map, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    def _resize_h(img, h):
+        ratio = h / img.shape[0]
+        return cv2.resize(img, (max(1, int(img.shape[1] * ratio)), h))
+
+    # --- PC1 heatmap: clip to 5th–95th percentile so structure is visible ---
+    vmin = float(np.percentile(pc1_map, 5))
+    vmax = float(np.percentile(pc1_map, 95))
+    pc1_clipped = np.clip(pc1_map, vmin, vmax)
+    pc1_norm  = cv2.normalize(pc1_clipped, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
     pc1_color = cv2.applyColorMap(pc1_norm, cv2.COLORMAP_JET)
 
-    # --- stats line ---
     valid_cov = [r for r in coverages if np.isfinite(r)]
     max_recall = max(valid_cov) if valid_cov else 0.0
-    stats_line = (
-        f"PC1  min={pc1_map.min():.3f}  max={pc1_map.max():.3f}  "
-        f"std={pc1_map.std():.3f}  max_recall={max_recall:.3f}"
-        + ("  [PC1 DEGENERATE → SAM3 fallback]" if pc1_fallback else "")
+    pc1_label = [
+        "PC1 heatmap (5–95 pct clip)",
+        f"min={pc1_map.min():.2f}  max={pc1_map.max():.2f}  std={pc1_map.std():.2f}",
+        f"max_recall={max_recall:.3f}" + ("  [DEGENERATE]" if pc1_fallback else ""),
+    ]
+    pc1_panel = _put_label(_resize_h(pc1_color, THUMB), pc1_label)
+
+    # --- comparison: original | SAM3 top pick | guided pick ---
+    sam3_mask = masks[0]
+    best_mask = masks[best_idx]
+    for m in (sam3_mask, best_mask):
+        if m.shape[:2] != (orig_h, orig_w):
+            m = cv2.resize(m, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
+
+    orig_panel = _put_label(_resize_h(bgr.copy(), THUMB), ["Original"])
+
+    sam3_ctr = center_scores[0] if center_scores else float("nan")
+    sam3_panel = _put_label(
+        _resize_h(overlay_mask(bgr, sam3_mask, 0.45, (0, 140, 255)), THUMB),
+        [f"SAM3 rank 1",
+         f"sam3={sam3_scores[0]:.4f}  area={sam3_mask.mean():.1%}",
+         f"recall={coverages[0]:.3f}  ctr={sam3_ctr:.3f}"],
     )
 
-    # Resize pc1 heatmap to match bgr
-    pc1_panel = cv2.resize(pc1_color, (orig_w, orig_h))
-    pc1_panel = _put_label(pc1_panel, [stats_line])
+    guided_ctr = center_scores[best_idx] if best_idx < len(center_scores) else float("nan")
+    guided_label = ["Guided PICK" + (" [PC1 fallback]" if pc1_fallback else ""),
+                    f"rank {best_idx+1}  sam3={sam3_scores[best_idx]:.4f}  area={best_mask.mean():.1%}",
+                    f"recall={coverages[best_idx]:.3f}  ctr={guided_ctr:.3f}  "
+                    f"comb={combined[best_idx]:.4f}"]
+    guided_panel = _put_label(
+        _resize_h(overlay_mask(bgr, best_mask, 0.45, (0, 220, 80)), THUMB),
+        guided_label,
+    )
+
+    sep_v = np.full((THUMB, 4, 3), 30, dtype=np.uint8)
+    top_row = np.hstack([pc1_panel, sep_v, orig_panel, sep_v, sam3_panel, sep_v, guided_panel])
 
     # --- top-k candidate panels ---
-    # Sort by combined score (finite first), then pick top_k
     ranked = sorted(
         range(len(masks)),
         key=lambda i: combined[i] if np.isfinite(combined[i]) else -1e9,
         reverse=True,
     )[:top_k]
 
-    THUMB = 320
     thumb_panels = []
     for rank_pos, idx in enumerate(ranked):
         mask = masks[idx]
         if mask.shape[:2] != (orig_h, orig_w):
             mask = cv2.resize(mask, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
         color = (0, 220, 80) if idx == best_idx else (0, 140, 255)
-        vis   = overlay_mask(bgr, mask, 0.45, color)
-        h, w  = vis.shape[:2]
-        thumb = cv2.resize(vis, (THUMB, int(h * THUMB / w)))
+        thumb = _resize_h(overlay_mask(bgr, mask, 0.45, color), THUMB)
+        ctr   = center_scores[idx] if idx < len(center_scores) else float("nan")
         label = [
             f"rank {rank_pos+1} (cand #{idx+1})" + (" ← PICK" if idx == best_idx else ""),
-            f"sam3={sam3_scores[idx]:.4f}  area={mask.mean():.1%}",
-            f"recall={coverages[idx]:.3f}  comb={combined[idx]:.4f}"
-            if np.isfinite(coverages[idx]) else "  [filtered by area]",
+            f"sam3={sam3_scores[idx]:.4f}  area={mask.mean():.1%}  ctr={ctr:.3f}",
+            (f"recall={coverages[idx]:.3f}  comb={combined[idx]:.4f}"
+             if np.isfinite(coverages[idx]) else "[filtered by area]"),
         ]
         thumb_panels.append(_put_label(thumb, label))
 
-    if thumb_panels:
-        th_h = max(p.shape[0] for p in thumb_panels)
-        sep  = np.full((th_h, 3, 3), 50, dtype=np.uint8)
-        padded = [np.pad(p, ((0, th_h - p.shape[0]), (0, 0), (0, 0))) for p in thumb_panels]
-        candidates_row = padded[0]
-        for p in padded[1:]:
-            candidates_row = np.hstack([candidates_row, sep, p])
-    else:
-        candidates_row = None
+    # Pad all thumb panels to same width so hstack works
+    max_tw = max(p.shape[1] for p in thumb_panels) if thumb_panels else 1
+    padded = [np.pad(p, ((0, 0), (0, max_tw - p.shape[1]), (0, 0))) for p in thumb_panels]
 
-    # --- pc1 heatmap scaled to candidate strip width ---
-    if candidates_row is not None:
-        strip_w = candidates_row.shape[1]
-        pc1_scaled = cv2.resize(pc1_panel,
-                                (strip_w, int(orig_h * strip_w / orig_w)))
-        debug_img = np.vstack([pc1_scaled, candidates_row])
-    else:
-        debug_img = pc1_panel
+    bot_row = np.hstack([padded[0]] + [np.hstack([sep_v, p]) for p in padded[1:]]) if padded else None
+
+    # Align widths of top and bottom rows
+    total_w = max(top_row.shape[1], bot_row.shape[1] if bot_row is not None else 0)
+    def _pad_w(img, w):
+        return np.pad(img, ((0, 0), (0, w - img.shape[1]), (0, 0)))
+
+    sep_h = np.full((4, total_w, 3), 30, dtype=np.uint8)
+    rows  = [_pad_w(top_row, total_w)]
+    if bot_row is not None:
+        rows += [sep_h, _pad_w(bot_row, total_w)]
+    debug_img = np.vstack(rows)
 
     out_path = debug_dir / f"{stem}_debug.png"
     cv2.imwrite(str(out_path), debug_img)
@@ -415,20 +484,21 @@ def main() -> None:
             pc1_map = compute_pc1_from_tokens(
                 _l23_captured["tokens"], orig_h, orig_w, polarity_mask=masks[0])
 
-        best_idx, combined, coverages, pc1_fallback = pick_by_combined(
+        best_idx, combined, coverages, center_scores, pc1_fallback = pick_by_combined(
             masks, scores, pc1_map, orig_h, orig_w)
 
         if pc1_fallback:
             print(f"  [PC1 degenerate — max recall < {PC1_FALLBACK_RECALL}] "
-                  f"falling back to SAM3 score")
+                  f"falling back to SAM3 × center")
 
         best_mask = masks[best_idx]
         if best_mask.shape[:2] != (orig_h, orig_w):
             best_mask = cv2.resize(best_mask, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
 
+        ctr = center_scores[best_idx] if best_idx < len(center_scores) else float("nan")
         print(f"  pick: rank {best_idx+1}  score={scores[best_idx]:.4f}  "
               f"area={best_mask.mean():.1%}  pc1_cov={coverages[best_idx]:.3f}  "
-              f"combined={combined[best_idx]:.4f}")
+              f"center={ctr:.3f}  combined={combined[best_idx]:.4f}")
 
         cv2.imwrite(str(mask_dir / f"{stem}_mask.png"), best_mask * 255)
         cv2.imwrite(str(viz_dir  / f"{stem}_viz.png"),
@@ -449,7 +519,7 @@ def main() -> None:
 
         if args.save_pc1:
             save_debug_pc1(debug_dir, stem, bgr, pc1_map,
-                           masks, scores, combined, coverages,
+                           masks, scores, combined, coverages, center_scores,
                            best_idx, pc1_fallback, top_k=args.top_k)
 
         img_elapsed = time.perf_counter() - t_img
@@ -462,6 +532,7 @@ def main() -> None:
                 "rank": best_idx + 1,
                 "score": scores[best_idx],
                 "pc1_coverage": coverages[best_idx],
+                "center_score": center_scores[best_idx] if best_idx < len(center_scores) else None,
                 "combined": combined[best_idx],
                 "area": float(best_mask.mean()),
             },
