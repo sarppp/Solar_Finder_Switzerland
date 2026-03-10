@@ -209,27 +209,38 @@ def main() -> None:
         detections_df = detections_df.copy()
         detections_df["building_id"] = detections_df["image_path"].map(_extract_building_id_from_image_path)
 
-    # Pick only the model has_solar_panel columns
+    # Build a single combined column per model: "oui(conf:0.85)" / "non(conf:0.10)"
+    def _model_cell(solar, conf):
+        if solar is None and conf is None:
+            return None
+        label = "oui" if solar is True else ("non" if solar is False else str(solar))
+        if conf is not None:
+            try:
+                label += f"(conf:{float(conf):.2f})"
+            except (TypeError, ValueError):
+                pass
+        return label
+
     model_cols = {}
     for model in ["yolo", "gemini", "openai", "ollama"]:
-        col = f"{model}.has_solar_panel"
-        if col in detections_df.columns:
-            model_cols[model] = detections_df[["building_id", col]].rename(columns={col: f"{model}_has_solar_panel"})
+        solar_col = f"{model}.has_solar_panel"
+        conf_col = f"{model}.confidence"
+        if solar_col not in detections_df.columns:
+            continue
+        tmp = detections_df[["building_id", solar_col]].copy()
+        tmp[conf_col] = detections_df[conf_col] if conf_col in detections_df.columns else None
+        tmp[model] = tmp.apply(lambda r: _model_cell(r[solar_col], r[conf_col]), axis=1)
+        model_cols[model] = tmp[["building_id", model]]
 
     # Merge model columns into buildings
     combined_df = buildings_df
     for model, df_model in model_cols.items():
-        combined_df = combined_df.merge(
-            df_model,
-            on="building_id",
-            how="left",
-        )
+        combined_df = combined_df.merge(df_model, on="building_id", how="left")
 
-    # Ensure the expected columns exist (add missing ones with empty)
+    # Ensure all model columns exist
     for model in ["yolo", "gemini", "openai", "ollama"]:
-        col_name = f"{model}_has_solar_panel"
-        if col_name not in combined_df.columns:
-            combined_df[col_name] = None
+        if model not in combined_df.columns:
+            combined_df[model] = None
 
     # Reorder columns
     ordered_cols = [
@@ -239,9 +250,9 @@ def main() -> None:
         "roof_area_m2",
         "avg_mstrahlung_kwh_m2_year",
         "sum_gstrahlung",
-        "sum_stromertrag_kwh_year"
+        "sum_stromertrag_kwh_year",
+        "yolo", "gemini", "openai", "ollama",
     ]
-    ordered_cols.extend([f"{m}_has_solar_panel" for m in ["yolo", "gemini", "openai", "ollama"]])
     combined_df = combined_df[[c for c in ordered_cols if c in combined_df.columns]]
 
     combined_df = _convert_bools_to_french(combined_df)
@@ -255,10 +266,10 @@ def main() -> None:
         "avg_mstrahlung_kwh_m2_year": "irradiation_moy_kwh_m2_an",
         "sum_gstrahlung": "somme_irradiation_globale",
         "sum_stromertrag_kwh_year": "somme_production_elec_kwh_an",
-        "yolo_has_solar_panel": "yolo_panneau_solaire",
-        "gemini_has_solar_panel": "gemini_panneau_solaire",
-        "openai_has_solar_panel": "openai_panneau_solaire",
-        "ollama_has_solar_panel": "ollama_panneau_solaire"
+        "yolo": "yolo_panneau_solaire",
+        "gemini": "gemini_panneau_solaire",
+        "openai": "openai_panneau_solaire",
+        "ollama": "ollama_panneau_solaire",
     }
     combined_df.rename(columns=french_columns, inplace=True)
 
