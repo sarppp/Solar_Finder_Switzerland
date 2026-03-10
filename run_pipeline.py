@@ -17,9 +17,9 @@ only need to specify the search area and the parameters you care about.
 Examples
 --------
  
-# Full pipeline for a municipality
-python3 run_pipeline.py --region "Langnau im Emmental" --residential-only
- 
+
+
+
 # Canton-level (large!)
 python3 run_pipeline.py --region "Bern" --max-results 500
  
@@ -292,7 +292,7 @@ def build_parser() -> argparse.ArgumentParser:
     s2.add_argument("--screenshot-size-m", type=float, default=None,
                     help="Screenshot coverage in meters (default: 50 for address mode, "
                          "auto-sized to building facet for facet mode)")
-    s2.add_argument("--screenshot-mode", default="address",
+    s2.add_argument("--screenshot-mode", default="facet",
                     choices=["address", "facet"],
                     help="Crop centering: 'address' (geocoded point, default) or "
                          "'facet' (roof-facet centroid via get_building_wms_overlay.py)")
