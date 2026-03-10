@@ -1,26 +1,42 @@
 #!/usr/bin/env python3
 """
-Get a satellite screenshot with WMS-rendered solar suitability polygon overlay
-for a building at a given address.
+Get a satellite screenshot centered on the roof-facet centroid of a building.
 
-The polygon overlay is rendered server-side by the GeoAdmin WMS — no manual
-coordinate math. The crop is centered on the building's roof facet centroid
-(not the geocoded address point, which is typically the front door).
+Unlike get_building_screenshot.py (which centers on the geocoded address / front
+door), this script queries the solar-suitability layer to find the actual roof
+facet polygon and centers the crop on its centroid.  This gives a more accurate
+crop when the geocoded address point is far from the roof (e.g. tall buildings
+or addresses that resolve to the front door).
 
 --size-m controls the total view width/height in metres (same meaning as
 --screenshot-size-m in get_building_screenshot.py). When omitted, the view
 is auto-sized to the building facet bbox + padding.
 
-Usage:
+The default output is a clean satellite image (no overlay), named to match
+the convention of get_building_screenshot.py: {stem}_{size}m.png
+
+Use --with-overlay to additionally save {stem}_overlay.png (solar suitability
+polygons composited on top of the satellite).  This flag is intended for
+standalone inspection only — the pipeline never passes it.
+
+Usage (single address):
     python3 get_building_wms_overlay.py "Hinterdorfstrasse 13 3550 Langnau im Emmental"
     python3 get_building_wms_overlay.py "Hinterdorfstrasse 13 3550 Langnau im Emmental" --size-m 80
-    python3 get_building_wms_overlay.py "Schützenweg 253 3550 Langnau im Emmental" --size-m 50 --no-overlay
-    python3 get_building_wms_overlay.py "Bahnhofstrasse 1 3008 Bern" --size-m 100 --output-dir outputs
+    python3 get_building_wms_overlay.py "Hinterdorfstrasse 13 3550 Langnau im Emmental" --with-overlay
+
+Usage (LV95 coordinates directly, no geocoding):
+    python3 get_building_wms_overlay.py --y 2627073.25 --x 1198657.78 --label "Hinterdorf13"
+
+Usage (batch from pipeline buildings JSON):
+    python3 get_building_wms_overlay.py --input-json buildings.json --output-dir outputs/screenshots
+    python3 get_building_wms_overlay.py --input-json buildings.json --limit 10
 """
 
 import argparse
+import json
 import os
 import re
+import sys
 import requests
 from io import BytesIO
 from PIL import Image
@@ -49,7 +65,7 @@ def geocode(address: str) -> tuple[float, float]:
 
 
 def get_roof_facet(addr_y: float, addr_x: float) -> dict | None:
-    """Point-query the solar suitability layer to get the roof facet at the address."""
+    """Point-query the solar suitability layer to get the roof facet at a coordinate."""
     resp = requests.get(f"{GEOADMIN_BASE}/MapServer/identify", params={
         "geometryType": "esriGeometryPoint",
         "geometry": f"{addr_y},{addr_x}",
@@ -100,85 +116,169 @@ def wms_image(layers: str, bbox: str, width: int, height: int,
     return Image.open(BytesIO(resp.content)).convert("RGBA")
 
 
-def sanitize(s: str) -> str:
-    s = re.sub(r"<[^>]+>", "", str(s)).strip()
-    s = re.sub(r"\s+", "_", s)
-    s = re.sub(r"[^A-Za-z0-9._-]", "_", s)
-    return re.sub(r"_+", "_", s)[:80]
+def _sanitize_filename(s: str) -> str:
+    """Identical to get_building_screenshot.py so batch stems match."""
+    s2 = re.sub(r"<[^>]+>", "", str(s))
+    s2 = s2.strip()
+    s2 = re.sub(r"\s+", " ", s2)
+    s2 = re.sub(r"[^A-Za-z0-9._ -]+", "_", s2)
+    s2 = s2.replace(" ", "_")
+    s2 = re.sub(r"_+", "_", s2)
+    if not s2:
+        return "item"
+    return s2[:120]
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Satellite + solar polygon overlay, WMS-rendered (no coord math)."
-    )
-    parser.add_argument("address", help="Street address in Switzerland")
-    parser.add_argument("--size-m", type=float, default=None,
-                        help="Total view size in metres (width=height). "
-                             "Overrides auto-sizing. E.g. --size-m 80 gives an 80×80m crop.")
-    parser.add_argument("--padding", type=float, default=20.0,
-                        help="Padding in metres around building bbox when --size-m is not set (default: 20)")
-    parser.add_argument("--size", type=int, default=800,
-                        help="Output image width/height in pixels (default: 800)")
-    parser.add_argument("--output-dir", default="outputs",
-                        help="Directory to save images (default: outputs)")
-    parser.add_argument("--no-overlay", action="store_true",
-                        help="Also save a clean satellite image without overlay")
-    args = parser.parse_args()
-
-    os.makedirs(args.output_dir, exist_ok=True)
-
-    # 1. Geocode
-    print(f"Geocoding: {args.address!r}")
-    addr_y, addr_x = geocode(args.address)
-    print(f"  LV95: y={addr_y:.2f}, x={addr_x:.2f}")
-
-    # 2. Find roof facet at address → get building centroid
-    facet = get_roof_facet(addr_y, addr_x)
+def process_one(y: float, x: float, label: str, output_dir: str,
+                size_m: float | None, padding: float, px_size: int,
+                with_overlay: bool = False) -> dict:
+    """Process a single building by LV95 coordinate. Returns result dict."""
+    facet = get_roof_facet(y, x)
     if not facet:
-        raise SystemExit("No solar roof facet found at this address.")
+        print(f"  WARNING: no solar facet at y={y:.1f} x={x:.1f}, skipping", file=sys.stderr)
+        return {"label": label, "error": "no_facet"}
 
     attrs = facet["attributes"]
-    bid = attrs.get("building_id")
-    klasse = attrs.get("klasse")
-    area = attrs.get("flaeche")
-    print(f"  building_id={bid}  roof_area={float(area or 0):.1f}m²  suitability_class={klasse}")
-
     min_y, min_x, max_y, max_x = facet_bbox(facet)
     facet_cy = (min_y + max_y) / 2
     facet_cx = (min_x + max_x) / 2
 
-    if args.size_m is not None:
-        # User-specified size centred on the facet centroid
-        half = args.size_m / 2.0
+    if size_m is not None:
+        half = size_m / 2.0
         b0, b1, b2, b3 = facet_cy - half, facet_cx - half, facet_cy + half, facet_cx + half
     else:
-        # Auto-size: building bbox + padding
-        b0, b1, b2, b3 = square_crop(min_y, min_x, max_y, max_x, args.padding)
+        b0, b1, b2, b3 = square_crop(min_y, min_x, max_y, max_x, padding)
 
+    actual_size_m = round(b2 - b0)
     bbox = f"{b0},{b1},{b2},{b3}"
-    side_m = b2 - b0
-    print(f"  Crop: {side_m:.1f}m × {side_m:.1f}m  (centred on facet, not address)")
+    stem = _sanitize_filename(label)
 
-    W = H = args.size
+    # Primary output: clean satellite image, named like get_building_screenshot.py
+    sat_path = os.path.join(output_dir, f"{stem}_{actual_size_m}m.png")
+    sat = wms_image("ch.swisstopo.swissimage", bbox, px_size, px_size)
+    sat.convert("RGB").save(sat_path)
 
-    # 3. Satellite image
-    print("Fetching satellite image...")
-    sat = wms_image("ch.swisstopo.swissimage", bbox, W, H)
+    print(f"  Saved: {sat_path}  ({actual_size_m}m × {actual_size_m}m  "
+          f"bid={attrs.get('building_id')} klasse={attrs.get('klasse')})",
+          file=sys.stderr)
 
-    # 4. Solar suitability overlay (WMS-rendered, server-side, perfectly aligned)
-    print("Fetching solar polygon overlay...")
-    solar = wms_image("ch.bfe.solarenergie-eignung-daecher", bbox, W, H, transparent=True)
+    result = {
+        "label": label,
+        "screenshot": sat_path,
+        "building_id": attrs.get("building_id"),
+        "klasse": attrs.get("klasse"),
+        "roof_area_m2": float(attrs.get("flaeche") or 0),
+        "crop_size_m": actual_size_m,
+        "coordinates": {"y": y, "x": x},
+    }
 
-    # 5. Compose and save
-    stem = sanitize(args.address)
-    overlay_path = os.path.join(args.output_dir, f"{stem}_overlay.png")
-    Image.alpha_composite(sat, solar).convert("RGB").save(overlay_path)
-    print(f"Saved: {overlay_path}")
+    # Optional overlay output (standalone use only)
+    if with_overlay:
+        overlay_path = os.path.join(output_dir, f"{stem}_overlay.png")
+        solar = wms_image("ch.bfe.solarenergie-eignung-daecher", bbox, px_size, px_size, transparent=True)
+        Image.alpha_composite(sat, solar).convert("RGB").save(overlay_path)
+        print(f"  Overlay: {overlay_path}", file=sys.stderr)
+        result["overlay"] = overlay_path
 
-    if args.no_overlay:
-        clean_path = os.path.join(args.output_dir, f"{stem}_clean.png")
-        sat.convert("RGB").save(clean_path)
-        print(f"Saved: {clean_path}")
+    return result
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Satellite screenshot centered on roof-facet centroid (optionally with WMS overlay)."
+    )
+    # Input modes
+    parser.add_argument("address", nargs="?", default=None,
+                        help="Street address in Switzerland (optional if using --y/--x or --input-json)")
+    parser.add_argument("--y", type=float, default=None, help="LV95 Easting (Swiss Y)")
+    parser.add_argument("--x", type=float, default=None, help="LV95 Northing (Swiss X)")
+    parser.add_argument("--label", default=None, help="Label for output filename (used with --y/--x)")
+    parser.add_argument("--input-json", default=None,
+                        help="Batch mode: path to buildings JSON from region_building_groups.py")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="Max buildings to process in batch mode")
+    # Crop / output
+    parser.add_argument("--size-m", type=float, default=None,
+                        help="Total view size in metres. Overrides auto-sizing.")
+    parser.add_argument("--padding", type=float, default=20.0,
+                        help="Padding around building bbox when --size-m is not set (default: 20)")
+    parser.add_argument("--size", type=int, default=800,
+                        help="Output image width/height in pixels (default: 800)")
+    parser.add_argument("--output-dir", default="outputs",
+                        help="Directory to save images (default: outputs)")
+    # Overlay (standalone only)
+    parser.add_argument("--with-overlay", action="store_true",
+                        help="Also save an overlay image with solar suitability polygons")
+    args = parser.parse_args()
+
+    # Validate input mode
+    has_coord = args.y is not None and args.x is not None
+    if not args.address and not has_coord and not args.input_json:
+        parser.error("Provide an address, --y/--x coordinates, or --input-json")
+    if args.y is not None and args.x is None or args.y is None and args.x is not None:
+        parser.error("Provide both --y and --x together")
+
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    out = {
+        "output_dir": args.output_dir,
+        "screenshot_size_m": args.size_m,
+        "screenshot_width": args.size,
+        "screenshot_height": args.size,
+        "results": [],
+    }
+
+    # ── Single coordinate mode ─────────────────────────────────────────
+    if has_coord:
+        label = args.label or f"y{args.y:.0f}_x{args.x:.0f}"
+        print(f"Coordinate mode: y={args.y}, x={args.x}  label={label!r}", file=sys.stderr)
+        result = process_one(args.y, args.x, label, args.output_dir,
+                             args.size_m, args.padding, args.size, args.with_overlay)
+        out["results"].append(result)
+        print(json.dumps(out, indent=2, ensure_ascii=False))
+        return
+
+    # ── Single address mode ────────────────────────────────────────────
+    if args.address:
+        print(f"Geocoding: {args.address!r}", file=sys.stderr)
+        y, x = geocode(args.address)
+        print(f"  LV95: y={y:.2f}, x={x:.2f}", file=sys.stderr)
+        result = process_one(y, x, args.address, args.output_dir,
+                             args.size_m, args.padding, args.size, args.with_overlay)
+        out["results"].append(result)
+        print(json.dumps(out, indent=2, ensure_ascii=False))
+        return
+
+    # ── Batch JSON mode ────────────────────────────────────────────────
+    with open(args.input_json, encoding="utf-8") as f:
+        data = json.load(f)
+    buildings = data.get("results", [])
+    if not isinstance(buildings, list):
+        raise SystemExit(f"No 'results' list in {args.input_json}")
+
+    if args.limit:
+        buildings = buildings[: args.limit]
+
+    print(f"Batch mode: {len(buildings)} buildings from {args.input_json}", file=sys.stderr)
+    for i, b in enumerate(buildings, 1):
+        coords = b.get("coordinates") or {}
+        y = coords.get("y")
+        x = coords.get("x")
+        if y is None or x is None:
+            continue
+        bid = b.get("building_id", i)
+        label = b.get("label") or f"b{bid}"
+        stem_label = f"b{bid}_{label}" if bid is not None else str(label)
+        print(f"[{i}/{len(buildings)}] building_id={bid}  label={str(label)[:40]!r}", file=sys.stderr)
+        result = process_one(float(y), float(x), stem_label,
+                             args.output_dir, args.size_m, args.padding, args.size,
+                             args.with_overlay)
+        result["building_id"] = bid
+        out["results"].append(result)
+
+    n_ok = sum(1 for r in out["results"] if "error" not in r)
+    print(f"\nDone: {n_ok}/{len(out['results'])} screenshots saved", file=sys.stderr)
+    print(json.dumps(out, indent=2, ensure_ascii=False))
 
 
 if __name__ == "__main__":

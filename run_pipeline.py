@@ -289,8 +289,13 @@ def build_parser() -> argparse.ArgumentParser:
  
     # ── Stage 2: get_building_screenshot ───────────────────────────────
     s2 = p.add_argument_group("Stage 2 - Screenshots (get_building_screenshot.py)")
-    s2.add_argument("--screenshot-size-m", type=float, default=50.0,
-                    help="Screenshot coverage in meters (default: 50)")
+    s2.add_argument("--screenshot-size-m", type=float, default=None,
+                    help="Screenshot coverage in meters (default: 50 for address mode, "
+                         "auto-sized to building facet for facet mode)")
+    s2.add_argument("--screenshot-mode", default="address",
+                    choices=["address", "facet"],
+                    help="Crop centering: 'address' (geocoded point, default) or "
+                         "'facet' (roof-facet centroid via get_building_wms_overlay.py)")
     s2.add_argument("--screenshot-width", type=int, default=800)
     s2.add_argument("--screenshot-height", type=int, default=800)
     s2.add_argument("--reuse-screenshot", action="store_true", default=True,
@@ -436,24 +441,35 @@ def main() -> None:
         if rc != 0 and not args.dry_run:
             sys.exit(rc)
  
-    # ── Stage 2: Screenshots ──────────────────────────────────────────
+    # ── Stage 2: Screenshots ────────────────────────────────────────────
     if args.start_stage <= 2 <= args.stop_stage:
-        cmd = [
-            sys.executable, os.path.join(BASE_DIR, "get_building_screenshot.py"),
-            "--input-json", buildings_json,
-            "--screenshots-dir", screenshots_dir,
-            "--screenshot-size-m", str(args.screenshot_size_m),
-            "--screenshot-width", str(args.screenshot_width),
-            "--screenshot-height", str(args.screenshot_height),
-        ]
-        if reuse_ss:
-            cmd.append("--reuse-screenshot")
+        if args.screenshot_mode == "facet":
+            cmd = [
+                sys.executable, os.path.join(BASE_DIR, "get_building_wms_overlay.py"),
+                "--input-json", buildings_json,
+                "--output-dir", screenshots_dir,
+                "--size", str(args.screenshot_width),
+            ]
+            if args.screenshot_size_m is not None:
+                cmd += ["--size-m", str(args.screenshot_size_m)]
+        else:
+            size_m = args.screenshot_size_m or 50.0
+            cmd = [
+                sys.executable, os.path.join(BASE_DIR, "get_building_screenshot.py"),
+                "--input-json", buildings_json,
+                "--screenshots-dir", screenshots_dir,
+                "--screenshot-size-m", str(size_m),
+                "--screenshot-width", str(args.screenshot_width),
+                "--screenshot-height", str(args.screenshot_height),
+            ]
+            if reuse_ss:
+                cmd.append("--reuse-screenshot")
         if args.limit is not None:
             cmd += ["--limit", str(args.limit)]
  
         # Capture stdout to save the screenshots JSON
         print(f"\n{'='*70}")
-        print(f"  STAGE: 2/5  Screenshots")
+        print(f"  STAGE: 2/5  Screenshots  [mode: {args.screenshot_mode}]")
         print(f"{'='*70}")
         cmd_str = " \\\n  ".join(cmd)
         print(f"$ {cmd_str}\n")
