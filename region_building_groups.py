@@ -54,6 +54,7 @@ python3 os.path.join(BASE_DIR, "region_building_groups.py") \
 
 #!/usr/bin/env python3
 import argparse
+import asyncio
 import json
 import logging
 import math
@@ -64,6 +65,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Optional
 
+import httpx
 import requests
 from tqdm import tqdm
 
@@ -429,6 +431,29 @@ def identify_envelope(layer_bodid: str, min_y: float, min_x: float, max_y: float
     resp.raise_for_status()
     return resp.json()
 
+async def identify_envelope_async(
+    client: httpx.AsyncClient,
+    layer_bodid: str,
+    min_y: float,
+    min_x: float,
+    max_y: float,
+    max_x: float,
+) -> dict:
+    url = f"{GEOADMIN_BASE}/MapServer/identify"
+    params = {
+        "geometryType": "esriGeometryEnvelope",
+        "geometry": f"{min_y},{min_x},{max_y},{max_x}",
+        "layers": f"all:{layer_bodid}",
+        "mapExtent": f"{min_y},{min_x},{max_y},{max_x}",
+        "imageDisplay": "1000,1000,96",
+        "tolerance": "0",
+        "returnGeometry": "true",
+        "sr": "2056",
+    }
+    resp = await client.get(url, params=params, timeout=60)
+    resp.raise_for_status()
+    return resp.json()
+
 def gwr_lookup_by_egid(egid: str | int) -> dict | None:
     """Lookup GWR by EGID using SearchServer API (more reliable than coordinate lookup)."""
     if not egid:
@@ -573,7 +598,7 @@ def _progress_milestones(tiles_processed: int, tiles_total_estimate: int | None,
         return min(100, max(last_pct_printed, pct2))
     return last_pct_printed
 
-def tile_query(
+async def tile_query(
     layer_bodid: str,
     min_y: float,
     min_x: float,
@@ -590,9 +615,9 @@ def tile_query(
     state_file: str | None = None,
     resume_key: str = "",
 ) -> tuple[list[dict], dict]:
-    """Generic tiled query with adaptive subdivision and resume support."""
-    
-    # Try to load existing state
+    """Async tiled query with adaptive subdivision, worker pool, and resume support."""
+
+    # Load existing state
     state = None
     if state_file:
         try:
@@ -604,24 +629,21 @@ def tile_query(
                         logger.info(f"Resuming {progress_label} from saved state ({len(state.get('processed_tiles', []))} tiles already done)")
         except Exception as e:
             logger.debug(f"Could not load state: {e}")
-    
+
     tiles_processed = 0
     total_returned = 0
     max_results_in_tile = 0
     tiles_subdivided = 0
     results: list[dict] = []
-    processed_tiles: list[tuple] = []
-    stack: list[tuple[float, float, float, float]] = []
-    
+    processed_tiles: set[tuple] = set()
+
     if state:
-        # Restore from state
         results = state.get('results', [])
-        processed_tiles = [tuple(t) for t in state.get('processed_tiles', [])]
+        processed_tiles = {tuple(t) for t in state.get('processed_tiles', [])}
         tiles_processed = state.get('tiles_processed', 0)
         total_returned = state.get('total_returned', 0)
         max_results_in_tile = state.get('max_results_in_tile', 0)
         tiles_subdivided = state.get('tiles_subdivided', 0)
-        stack = [tuple(t) for t in state.get('stack', [])]
 
     tiles_total_estimate = int(
         max(1, math.ceil((max_y - min_y) / tile_size_m)) * max(1, math.ceil((max_x - min_x) / tile_size_m))
@@ -629,14 +651,14 @@ def tile_query(
     last_pct_printed = -progress_every_pct
     last_tiles_printed = 0
 
-    # Build initial stack only if we don't have a saved pending stack
-    if not stack:
-        initial_stack = [(min_y, min_x, max_y, max_x)]
-        for tile in initial_stack:
-            if tile not in processed_tiles:
-                stack.append(tile)
-    
-    if not stack and processed_tiles:
+    # Determine initial tiles from saved pending stack or fresh full-region tile
+    if state and state.get('stack'):
+        initial_tiles = [tuple(t) for t in state['stack']]
+    else:
+        initial_tiles = [(min_y, min_x, max_y, max_x)]
+    initial_tiles = [t for t in initial_tiles if t not in processed_tiles]
+
+    if not initial_tiles and processed_tiles:
         logger.info(f"All {progress_label} tiles already processed, using cached results")
         return results, {
             "tiles_processed": tiles_processed,
@@ -650,6 +672,9 @@ def tile_query(
             "resumed": True,
         }
 
+    # pending_tiles mirrors what is in the queue so we can save state accurately
+    pending_tiles: set[tuple] = set(initial_tiles)
+
     def save_state():
         if state_file:
             try:
@@ -659,8 +684,8 @@ def tile_query(
                         full_state = json.load(f)
                 full_state[resume_key] = {
                     'results': results,
-                    'processed_tiles': processed_tiles,
-                    'stack': stack,
+                    'processed_tiles': [list(t) for t in processed_tiles],
+                    'stack': [list(t) for t in pending_tiles],
                     'tiles_processed': tiles_processed,
                     'total_returned': total_returned,
                     'max_results_in_tile': max_results_in_tile,
@@ -672,56 +697,81 @@ def tile_query(
             except Exception as e:
                 logger.debug(f"Could not save state: {e}")
 
-    while stack:
-        tmin_y, tmin_x, tmax_y, tmax_x = stack.pop()
-        tiles_processed += 1
-        if max_tiles is not None and tiles_processed > int(max_tiles):
-            break
+    queue: asyncio.Queue[tuple[float, float, float, float]] = asyncio.Queue()
+    semaphore = asyncio.Semaphore(5)
 
-        data = identify_envelope(layer_bodid, tmin_y, tmin_x, tmax_y, tmax_x)
-        if sleep_s and sleep_s > 0:
-            time.sleep(float(sleep_s))
+    for tile in initial_tiles:
+        await queue.put(tile)
 
-        res_list = data.get("results", []) or []
-        total_returned += len(res_list)
-        max_results_in_tile = max(max_results_in_tile, len(res_list))
+    async def worker(client: httpx.AsyncClient):
+        nonlocal tiles_processed, total_returned, max_results_in_tile, tiles_subdivided
+        nonlocal last_pct_printed, last_tiles_printed
 
-        width = tmax_x - tmin_x
-        height = tmax_y - tmin_y
-        if len(res_list) >= 190 and width > float(min_tile_size_m) and height > float(min_tile_size_m):
-            tiles_subdivided += 1
-            mid_y = (tmin_y + tmax_y) / 2
-            mid_x = (tmin_x + tmax_x) / 2
-            new_tiles = [
-                (tmin_y, tmin_x, mid_y, mid_x),
-                (tmin_y, mid_x, mid_y, tmax_x),
-                (mid_y, tmin_x, tmax_y, mid_x),
-                (mid_y, mid_x, tmax_y, tmax_x),
-            ]
-            for nt in new_tiles:
-                if nt not in processed_tiles:
-                    stack.append(nt)
-            continue
+        while True:
+            tile = await queue.get()
+            tmin_y, tmin_x, tmax_y, tmax_x = tile
+            try:
+                if max_tiles is not None and tiles_processed >= int(max_tiles):
+                    continue  # queue.task_done() fires in finally
 
-        for r in res_list:
-            extracted = extract_fn(r)
-            if extracted is not None:
-                results.append(extracted)
-        
-        # Mark tile as processed and save state
-        processed_tiles.append((tmin_y, tmin_x, tmax_y, tmax_x))
-        if tiles_processed % 5 == 0:  # Save every 5 tiles
-            save_state()
+                async with semaphore:
+                    if sleep_s and sleep_s > 0:
+                        await asyncio.sleep(float(sleep_s))
+                    data = await identify_envelope_async(client, layer_bodid, tmin_y, tmin_x, tmax_y, tmax_x)
 
-        new_pct = _progress_milestones(tiles_processed, tiles_total_estimate, last_pct_printed, int(progress_every_pct))
-        if new_pct != last_pct_printed:
-            last_pct_printed = new_pct
-            logger.info(f"Progress {progress_label}: ~{last_pct_printed}% (tiles_processed={tiles_processed}, tiles_remaining={len(stack)})")
-        if tiles_processed - last_tiles_printed >= 25:
-            last_tiles_printed = tiles_processed
-            logger.info(f"Progress {progress_label}: tiles_processed={tiles_processed}, tiles_remaining={len(stack)}")
+                tiles_processed += 1
+                pending_tiles.discard(tile)
 
-    # Final save
+                res_list = data.get("results", []) or []
+                total_returned += len(res_list)
+                max_results_in_tile = max(max_results_in_tile, len(res_list))
+
+                width = tmax_x - tmin_x
+                height = tmax_y - tmin_y
+                if len(res_list) >= 190 and width > float(min_tile_size_m) and height > float(min_tile_size_m):
+                    tiles_subdivided += 1
+                    mid_y = (tmin_y + tmax_y) / 2
+                    mid_x = (tmin_x + tmax_x) / 2
+                    new_tiles = [
+                        (tmin_y, tmin_x, mid_y, mid_x),
+                        (tmin_y, mid_x, mid_y, tmax_x),
+                        (mid_y, tmin_x, tmax_y, mid_x),
+                        (mid_y, mid_x, tmax_y, tmax_x),
+                    ]
+                    for nt in new_tiles:
+                        if nt not in processed_tiles and nt not in pending_tiles:
+                            pending_tiles.add(nt)
+                            await queue.put(nt)
+                else:
+                    for r in res_list:
+                        extracted = extract_fn(r)
+                        if extracted is not None:
+                            results.append(extracted)
+                    processed_tiles.add(tile)
+
+                    if tiles_processed % 5 == 0:
+                        save_state()
+
+                    new_pct = _progress_milestones(tiles_processed, tiles_total_estimate, last_pct_printed, int(progress_every_pct))
+                    if new_pct != last_pct_printed:
+                        last_pct_printed = new_pct
+                        logger.info(f"Progress {progress_label}: ~{last_pct_printed}% (tiles_processed={tiles_processed}, tiles_remaining={queue.qsize()})")
+                    if tiles_processed - last_tiles_printed >= 25:
+                        last_tiles_printed = tiles_processed
+                        logger.info(f"Progress {progress_label}: tiles_processed={tiles_processed}, tiles_remaining={queue.qsize()}")
+
+            except Exception as e:
+                logger.warning(f"Error processing tile {tile}: {e}")
+            finally:
+                queue.task_done()
+
+    async with httpx.AsyncClient() as client:
+        worker_tasks = [asyncio.create_task(worker(client)) for _ in range(5)]
+        await queue.join()
+        for task in worker_tasks:
+            task.cancel()
+        await asyncio.gather(*worker_tasks, return_exceptions=True)
+
     save_state()
 
     debug_info = {
@@ -760,7 +810,7 @@ def _extract_plant(r: dict) -> Plant | None:
         id=r.get("id"),
     )
 
-def collect_plants_from_bbox(
+async def collect_plants_from_bbox(
     min_y: float,
     min_x: float,
     max_y: float,
@@ -773,7 +823,7 @@ def collect_plants_from_bbox(
     debug: bool,
     state_file: str | None = None,
 ) -> tuple[list[Plant], dict]:
-    plants, debug_info = tile_query(
+    plants, debug_info = await tile_query(
         layer_bodid="ch.bfe.elektrizitaetsproduktionsanlagen",
         min_y=min_y,
         min_x=min_x,
@@ -932,7 +982,7 @@ def _weighted_mean(items: list[tuple[Facet, float]], key: str) -> float | None:
             total_weight += weight
     return total_val / total_weight if total_weight > 0 else None
 
-def collect_buildings_from_region(
+async def collect_buildings_from_region(
     region: str,
     min_roof_area_m2: float,
     tile_size_m: float,
@@ -947,7 +997,7 @@ def collect_buildings_from_region(
 ) -> tuple[dict[int, Building], dict]:
     min_y, min_x, max_y, max_x = bbox_fn(region)
 
-    facets, debug_info = tile_query(
+    facets, debug_info = await tile_query(
         layer_bodid="ch.bfe.solarenergie-eignung-daecher",
         min_y=min_y,
         min_x=min_x,
@@ -1168,7 +1218,7 @@ def collect_single_building(
     
     return out, debug_info
 
-def main() -> None:
+async def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--region", default=None, help="Region name (e.g., 'Payerne'). Use --coord for single building mode.")
     parser.add_argument("--coord", default=None, help="Single coordinate mode: 'y,x' (e.g., '2561977.054,1185216.497'). Overrides --region.")
@@ -1217,6 +1267,7 @@ def main() -> None:
     parser.add_argument("--include-raw-results", action="store_true", help="Include raw API results like req.py for debugging")
     parser.add_argument("--out", default="region_groups.json")
     args = parser.parse_args()
+    t0 = time.perf_counter()
 
     # Handle single coordinate mode
     coord_y: float | None = None
@@ -1273,7 +1324,7 @@ def main() -> None:
         )
         # For plants, use a small bbox around the coordinate
         plant_bbox_radius = max(args.plant_radius * 2, 100.0)
-        plants, debug_plants = collect_plants_from_bbox(
+        plants, debug_plants = await collect_plants_from_bbox(
             min_y=coord_y - plant_bbox_radius,
             min_x=coord_x - plant_bbox_radius,
             max_y=coord_y + plant_bbox_radius,
@@ -1290,7 +1341,7 @@ def main() -> None:
         target_region = args.region if args.region else args.canton
         bbox_fn = region_bbox_from_name if args.region else canton_bbox_from_name
 
-        buildings, debug_buildings = collect_buildings_from_region(
+        buildings, debug_buildings = await collect_buildings_from_region(
             region=target_region,
             min_roof_area_m2=args.min_roof_area,
             tile_size_m=args.tile_size_m,
@@ -1305,7 +1356,7 @@ def main() -> None:
         )
 
         bbox = (debug_buildings.get("region_bbox_lv95") or {}) if isinstance(debug_buildings, dict) else {}
-        plants, debug_plants = collect_plants_from_bbox(
+        plants, debug_plants = await collect_plants_from_bbox(
             min_y=float(bbox.get("min_y")),
             min_x=float(bbox.get("min_x")),
             max_y=float(bbox.get("max_y")),
@@ -1550,7 +1601,11 @@ def main() -> None:
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(output, f, indent=2, ensure_ascii=False)
 
-    logger.info(f"Region: {args.region} | Total: {len(items)} | PV: {pv_count} | No PV: {no_pv_count} | Saved to: {args.out}")
+    elapsed = time.perf_counter() - t0
+    h, rem = divmod(int(elapsed), 3600)
+    m, s = divmod(rem, 60)
+    elapsed_str = (f"{h}h {m}m {s}s" if h else f"{m}m {s}s" if m else f"{elapsed:.1f}s")
+    logger.info(f"Region: {args.region} | Total: {len(items)} | PV: {pv_count} | No PV: {no_pv_count} | Saved to: {args.out} | Elapsed: {elapsed_str}")
 
     # Clean up state file on successful completion
     if args.state_file and os.path.exists(args.state_file):
@@ -1563,4 +1618,4 @@ def main() -> None:
     print(json.dumps(output, indent=2, ensure_ascii=False))
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
