@@ -16,11 +16,16 @@ dominant semantic axis separates building from background. Multiplying by
 the SAM3 score kills tiny fragments (score ≈ 0) and large wrong-region
 masks (coverage ≈ 0), rewarding the correct building footprint.
 
+PC1 fallback: when max PC1 recall across all candidates < PC1_FALLBACK_RECALL,
+the PC1 signal is degenerate (e.g. road/edge artefacts dominate). In that case
+we fall back to pure SAM3 score ordering.
+
 No external models. No hand-tuned thresholds. Both signals from SAM3.
 
 Usage:
   uv run python feature_guided_sam3.py image.png
   uv run python feature_guided_sam3.py "screenshots/*.png" --compare
+  uv run python feature_guided_sam3.py image.png --save-pc1 --debug-dir dbg
 """
 
 from __future__ import annotations
@@ -57,6 +62,8 @@ SAM3_TRANSFORM = transforms.Compose([
 GRID = 72   # SAM3 ViT-H: 1008 / 14 = 72 patches per side
 L23  = 23   # peak semantic layer
 
+PC1_FALLBACK_RECALL = 0.15   # if max recall < this, PC1 is degenerate → use SAM3 score
+
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
@@ -69,17 +76,26 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--mask-dir", default="feature_guided_outputs/masks")
     p.add_argument("--metadata-out", default="feature_guided_outputs/results.json")
     p.add_argument("--alpha", type=float, default=0.45)
+    # debug / analysis flags
+    p.add_argument("--save-pc1", action="store_true",
+                   help="Save PC1 heatmap + candidate score table to --debug-dir")
+    p.add_argument("--debug-dir", default="feature_guided_outputs/debug",
+                   help="Directory for debug outputs (PC1 heatmaps, score tables)")
+    p.add_argument("--top-k", type=int, default=5,
+                   help="Number of top candidates to show in debug grid")
+    p.add_argument("--imagenet-norm", action="store_true",
+                   help="Use ImageNet-normed forward pass for PC1 instead of hook (diagnostic)")
     return p.parse_args()
 
 
-def extract_pc1_map(model, image: Image.Image, device: torch.device,
-                    orig_h: int, orig_w: int) -> np.ndarray:
-    """Return (orig_h, orig_w) float32 z-scored L23 PC1 map. Positive = building.
+# ---------------------------------------------------------------------------
+# PC1 helpers
+# ---------------------------------------------------------------------------
 
-    NOTE: kept for standalone use. In the main inference loop use
-    compute_pc1_from_tokens() on tokens already captured by the permanent hook
-    registered around run_sam3() to avoid a second vision-backbone forward pass.
-    """
+def extract_pc1_map(model, image: Image.Image, device: torch.device,
+                    orig_h: int, orig_w: int,
+                    polarity_mask: Optional[np.ndarray] = None) -> np.ndarray:
+    """Explicit ImageNet-norm forward pass → PC1 map. Used only with --imagenet-norm."""
     img_t = SAM3_TRANSFORM(image).unsqueeze(0).to(device)
     captured: dict = {}
 
@@ -92,24 +108,40 @@ def extract_pc1_map(model, image: Image.Image, device: torch.device,
         model.backbone.vision_backbone(img_t)
     h.remove()
 
-    return compute_pc1_from_tokens(captured["tokens"], orig_h, orig_w)
+    return compute_pc1_from_tokens(captured["tokens"], orig_h, orig_w, polarity_mask)
 
 
-def compute_pc1_from_tokens(tokens: torch.Tensor, orig_h: int, orig_w: int) -> np.ndarray:
+def compute_pc1_from_tokens(tokens: torch.Tensor, orig_h: int, orig_w: int,
+                             polarity_mask: Optional[np.ndarray] = None) -> np.ndarray:
     """PCA on pre-captured L23 tokens → (orig_h, orig_w) float32 z-scored PC1 map.
 
-    Takes tokens already captured by a forward hook during processor.set_image()
-    so no additional vision-backbone pass is needed.
+    Takes tokens already captured by the permanent forward hook during run_sam3()
+    → no second vision-backbone pass needed.
+
+    polarity_mask: optional binary mask (orig_h × orig_w).  Its centroid is used
+    to orient PC1 (positive = building).  Falls back to image centre if None or empty.
     """
     flat = tokens.reshape(-1, 1024).numpy()
     pc1  = PCA(n_components=1, random_state=42).fit_transform(flat).reshape(GRID, GRID)
 
-    if pc1[GRID // 2, GRID // 2] < 0:
+    # Orient PC1: positive values should be "building"
+    if polarity_mask is not None and polarity_mask.sum() > 0:
+        m_grid = cv2.resize(polarity_mask.astype(np.float32), (GRID, GRID))
+        cy = int(np.average(np.arange(GRID), weights=m_grid.mean(axis=1)))
+        cx = int(np.average(np.arange(GRID), weights=m_grid.mean(axis=0)))
+    else:
+        cy, cx = GRID // 2, GRID // 2
+
+    if pc1[cy, cx] < 0:
         pc1 = -pc1
 
     pc1 = (pc1 - pc1.mean()) / (pc1.std() + 1e-8)
     return cv2.resize(pc1.astype(np.float32), (orig_w, orig_h))
 
+
+# ---------------------------------------------------------------------------
+# SAM3 inference
+# ---------------------------------------------------------------------------
 
 def run_sam3(processor: Sam3Processor, image: Image.Image,
              prompt: str, box: Optional[List[float]]) -> Tuple[List[np.ndarray], List[float]]:
@@ -131,10 +163,14 @@ def run_sam3(processor: Sam3Processor, image: Image.Image,
     return masks, scores
 
 
+# ---------------------------------------------------------------------------
+# Scoring / picking
+# ---------------------------------------------------------------------------
+
 def pick_by_combined(masks: List[np.ndarray], sam3_scores: List[float],
                      pc1_map: np.ndarray, orig_h: int, orig_w: int,
                      min_area: float = 0.02, max_area: float = 0.90,
-                     ) -> Tuple[int, List[float], List[float]]:
+                     ) -> Tuple[int, List[float], List[float], bool]:
     """Score = SAM3_score × pc1_recall
     pc1_recall = |mask ∩ hot| / |hot|   (hot = PC1 above image median)
 
@@ -143,6 +179,10 @@ def pick_by_combined(masks: List[np.ndarray], sam3_scores: List[float],
     hot zone, so it cannot distinguish a partial wing from the whole building.
     Recall grows with mask area until the mask covers the full hot zone,
     naturally selecting the most complete building footprint.
+
+    Returns (best_idx, combined_scores, coverages, pc1_fallback).
+    pc1_fallback=True when max recall < PC1_FALLBACK_RECALL — in that case
+    best_idx is chosen by pure SAM3 score instead.
     """
     pc1_median  = float(np.median(pc1_map))
     hot         = pc1_map > pc1_median
@@ -159,8 +199,20 @@ def pick_by_combined(masks: List[np.ndarray], sam3_scores: List[float],
         recall = float((hot & m.astype(bool)).sum()) / total_hot
         coverages.append(recall)
         combined.append(sam3_scores[i] * recall)
-    return int(np.argmax(combined)), combined, coverages
 
+    max_recall = max((r for r in coverages if np.isfinite(r)), default=0.0)
+    if max_recall < PC1_FALLBACK_RECALL:
+        # PC1 is degenerate — fall back to pure SAM3 score
+        valid = [i for i, c in enumerate(combined) if np.isfinite(c)]
+        best_idx = max(valid, key=lambda i: sam3_scores[i]) if valid else 0
+        return best_idx, combined, coverages, True
+
+    return int(np.argmax(combined)), combined, coverages, False
+
+
+# ---------------------------------------------------------------------------
+# Visualisation helpers
+# ---------------------------------------------------------------------------
 
 def overlay_mask(bgr: np.ndarray, mask: np.ndarray, alpha: float = 0.45,
                  color: Tuple[int, int, int] = (0, 220, 80)) -> np.ndarray:
@@ -214,6 +266,87 @@ def make_comparison(bgr, sam3_mask, best_mask, sam3_lines, best_lines, alpha):
     return np.hstack([padded[0], sep, padded[1], sep, padded[2]])
 
 
+def save_debug_pc1(debug_dir: Path, stem: str,
+                   bgr: np.ndarray, pc1_map: np.ndarray,
+                   masks: List[np.ndarray], sam3_scores: List[float],
+                   combined: List[float], coverages: List[float],
+                   best_idx: int, pc1_fallback: bool,
+                   top_k: int = 5) -> None:
+    """Save PC1 heatmap + candidate grid to debug_dir/stem_debug.png."""
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    orig_h, orig_w = bgr.shape[:2]
+
+    # --- PC1 heatmap ---
+    pc1_norm = cv2.normalize(pc1_map, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    pc1_color = cv2.applyColorMap(pc1_norm, cv2.COLORMAP_JET)
+
+    # --- stats line ---
+    valid_cov = [r for r in coverages if np.isfinite(r)]
+    max_recall = max(valid_cov) if valid_cov else 0.0
+    stats_line = (
+        f"PC1  min={pc1_map.min():.3f}  max={pc1_map.max():.3f}  "
+        f"std={pc1_map.std():.3f}  max_recall={max_recall:.3f}"
+        + ("  [PC1 DEGENERATE → SAM3 fallback]" if pc1_fallback else "")
+    )
+
+    # Resize pc1 heatmap to match bgr
+    pc1_panel = cv2.resize(pc1_color, (orig_w, orig_h))
+    pc1_panel = _put_label(pc1_panel, [stats_line])
+
+    # --- top-k candidate panels ---
+    # Sort by combined score (finite first), then pick top_k
+    ranked = sorted(
+        range(len(masks)),
+        key=lambda i: combined[i] if np.isfinite(combined[i]) else -1e9,
+        reverse=True,
+    )[:top_k]
+
+    THUMB = 320
+    thumb_panels = []
+    for rank_pos, idx in enumerate(ranked):
+        mask = masks[idx]
+        if mask.shape[:2] != (orig_h, orig_w):
+            mask = cv2.resize(mask, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
+        color = (0, 220, 80) if idx == best_idx else (0, 140, 255)
+        vis   = overlay_mask(bgr, mask, 0.45, color)
+        h, w  = vis.shape[:2]
+        thumb = cv2.resize(vis, (THUMB, int(h * THUMB / w)))
+        label = [
+            f"rank {rank_pos+1} (cand #{idx+1})" + (" ← PICK" if idx == best_idx else ""),
+            f"sam3={sam3_scores[idx]:.4f}  area={mask.mean():.1%}",
+            f"recall={coverages[idx]:.3f}  comb={combined[idx]:.4f}"
+            if np.isfinite(coverages[idx]) else "  [filtered by area]",
+        ]
+        thumb_panels.append(_put_label(thumb, label))
+
+    if thumb_panels:
+        th_h = max(p.shape[0] for p in thumb_panels)
+        sep  = np.full((th_h, 3, 3), 50, dtype=np.uint8)
+        padded = [np.pad(p, ((0, th_h - p.shape[0]), (0, 0), (0, 0))) for p in thumb_panels]
+        candidates_row = padded[0]
+        for p in padded[1:]:
+            candidates_row = np.hstack([candidates_row, sep, p])
+    else:
+        candidates_row = None
+
+    # --- pc1 heatmap scaled to candidate strip width ---
+    if candidates_row is not None:
+        strip_w = candidates_row.shape[1]
+        pc1_scaled = cv2.resize(pc1_panel,
+                                (strip_w, int(orig_h * strip_w / orig_w)))
+        debug_img = np.vstack([pc1_scaled, candidates_row])
+    else:
+        debug_img = pc1_panel
+
+    out_path = debug_dir / f"{stem}_debug.png"
+    cv2.imwrite(str(out_path), debug_img)
+    print(f"  debug → {out_path}")
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
 def main() -> None:
     args = parse_args()
 
@@ -231,6 +364,7 @@ def main() -> None:
     viz_dir  = Path(args.viz_dir);  viz_dir.mkdir(parents=True, exist_ok=True)
     mask_dir = Path(args.mask_dir); mask_dir.mkdir(parents=True, exist_ok=True)
     Path(args.metadata_out).parent.mkdir(parents=True, exist_ok=True)
+    debug_dir = Path(args.debug_dir)
 
     device = torch.device(args.device)
     sam3   = build_sam3_image_model()
@@ -239,9 +373,10 @@ def main() -> None:
     processor.set_confidence_threshold(args.confidence)
     print(f"SAM3 ready.  {len(image_paths)} image(s).\n")
 
-    # Register the hook once. processor.set_image() calls backbone.forward_image()
-    # which calls vision_backbone.forward() and passes through all trunk blocks,
-    # so the hook fires during run_sam3() as a side effect — no second pass needed.
+    # Register the hook once before the loop.
+    # processor.set_image() calls backbone.forward_image() → vision_backbone.forward()
+    # → trunk.blocks[L23], so the hook fires during run_sam3() as a side effect —
+    # no second vision-backbone forward pass needed.
     _l23_captured: dict = {}
 
     def _l23_hook(mod, inp, out):
@@ -260,17 +395,33 @@ def main() -> None:
         orig_w, orig_h = image.size
         bgr    = cv2.imread(str(image_path))
 
-        # processor.set_image() triggers _l23_hook as a side effect
+        stem = image_path.stem   # needed before save_debug_pc1 / summary
+
+        # run_sam3() → processor.set_image() triggers _l23_hook as a side effect
         masks, scores = run_sam3(processor, image, args.prompt, None)
         if not masks:
             print(f"  No masks — skipping.  ({time.perf_counter() - t_img:.1f}s)\n")
             continue
 
-        # PCA on already-captured tokens — no second vision-backbone forward pass
-        pc1_map = compute_pc1_from_tokens(_l23_captured["tokens"], orig_h, orig_w)
         print(f"  {len(masks)} candidates  score range: {scores[0]:.4f} → {scores[-1]:.4f}")
 
-        best_idx, combined, coverages = pick_by_combined(masks, scores, pc1_map, orig_h, orig_w)
+        if args.imagenet_norm:
+            # Diagnostic path: explicit ImageNet-norm forward pass
+            pc1_map = extract_pc1_map(sam3, image, device, orig_h, orig_w,
+                                      polarity_mask=masks[0])
+            print("  [imagenet-norm] PC1 from explicit forward pass")
+        else:
+            # Normal path: use tokens already captured by the hook above
+            pc1_map = compute_pc1_from_tokens(
+                _l23_captured["tokens"], orig_h, orig_w, polarity_mask=masks[0])
+
+        best_idx, combined, coverages, pc1_fallback = pick_by_combined(
+            masks, scores, pc1_map, orig_h, orig_w)
+
+        if pc1_fallback:
+            print(f"  [PC1 degenerate — max recall < {PC1_FALLBACK_RECALL}] "
+                  f"falling back to SAM3 score")
+
         best_mask = masks[best_idx]
         if best_mask.shape[:2] != (orig_h, orig_w):
             best_mask = cv2.resize(best_mask, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
@@ -279,7 +430,6 @@ def main() -> None:
               f"area={best_mask.mean():.1%}  pc1_cov={coverages[best_idx]:.3f}  "
               f"combined={combined[best_idx]:.4f}")
 
-        stem = image_path.stem
         cv2.imwrite(str(mask_dir / f"{stem}_mask.png"), best_mask * 255)
         cv2.imwrite(str(viz_dir  / f"{stem}_viz.png"),
                     overlay_mask(bgr, best_mask, args.alpha))
@@ -297,11 +447,17 @@ def main() -> None:
                 alpha=args.alpha,
             ))
 
+        if args.save_pc1:
+            save_debug_pc1(debug_dir, stem, bgr, pc1_map,
+                           masks, scores, combined, coverages,
+                           best_idx, pc1_fallback, top_k=args.top_k)
+
         img_elapsed = time.perf_counter() - t_img
         summary.append({
             "image": str(image_path),
             "n_candidates": len(masks),
             "elapsed_s": round(img_elapsed, 2),
+            "pc1_fallback": pc1_fallback,
             "pick": {
                 "rank": best_idx + 1,
                 "score": scores[best_idx],
