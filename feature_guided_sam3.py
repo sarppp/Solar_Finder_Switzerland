@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -73,7 +74,12 @@ def parse_args() -> argparse.Namespace:
 
 def extract_pc1_map(model, image: Image.Image, device: torch.device,
                     orig_h: int, orig_w: int) -> np.ndarray:
-    """Return (orig_h, orig_w) float32 z-scored L23 PC1 map. Positive = building."""
+    """Return (orig_h, orig_w) float32 z-scored L23 PC1 map. Positive = building.
+
+    NOTE: kept for standalone use. In the main inference loop use
+    compute_pc1_from_tokens() on tokens already captured by the permanent hook
+    registered around run_sam3() to avoid a second vision-backbone forward pass.
+    """
     img_t = SAM3_TRANSFORM(image).unsqueeze(0).to(device)
     captured: dict = {}
 
@@ -86,7 +92,16 @@ def extract_pc1_map(model, image: Image.Image, device: torch.device,
         model.backbone.vision_backbone(img_t)
     h.remove()
 
-    flat = captured["tokens"].reshape(-1, 1024).numpy()
+    return compute_pc1_from_tokens(captured["tokens"], orig_h, orig_w)
+
+
+def compute_pc1_from_tokens(tokens: torch.Tensor, orig_h: int, orig_w: int) -> np.ndarray:
+    """PCA on pre-captured L23 tokens → (orig_h, orig_w) float32 z-scored PC1 map.
+
+    Takes tokens already captured by a forward hook during processor.set_image()
+    so no additional vision-backbone pass is needed.
+    """
+    flat = tokens.reshape(-1, 1024).numpy()
     pc1  = PCA(n_components=1, random_state=42).fit_transform(flat).reshape(GRID, GRID)
 
     if pc1[GRID // 2, GRID // 2] < 0:
@@ -224,20 +239,35 @@ def main() -> None:
     processor.set_confidence_threshold(args.confidence)
     print(f"SAM3 ready.  {len(image_paths)} image(s).\n")
 
+    # Register the hook once. processor.set_image() calls backbone.forward_image()
+    # which calls vision_backbone.forward() and passes through all trunk blocks,
+    # so the hook fires during run_sam3() as a side effect — no second pass needed.
+    _l23_captured: dict = {}
+
+    def _l23_hook(mod, inp, out):
+        if out.ndim == 4 and out.shape[0] == 1:
+            _l23_captured["tokens"] = out[0].detach().cpu().float()
+
+    _hook_handle = sam3.backbone.vision_backbone.trunk.blocks[L23].register_forward_hook(_l23_hook)
+
     summary = []
+    t_total = time.perf_counter()
 
     for img_idx, image_path in enumerate(image_paths, 1):
+        t_img = time.perf_counter()
         print(f"[{img_idx}/{len(image_paths)}] {image_path.name}")
         image  = Image.open(str(image_path)).convert("RGB")
         orig_w, orig_h = image.size
         bgr    = cv2.imread(str(image_path))
 
-        pc1_map = extract_pc1_map(sam3, image, device, orig_h, orig_w)
-
+        # processor.set_image() triggers _l23_hook as a side effect
         masks, scores = run_sam3(processor, image, args.prompt, None)
         if not masks:
-            print("  No masks — skipping.\n")
+            print(f"  No masks — skipping.  ({time.perf_counter() - t_img:.1f}s)\n")
             continue
+
+        # PCA on already-captured tokens — no second vision-backbone forward pass
+        pc1_map = compute_pc1_from_tokens(_l23_captured["tokens"], orig_h, orig_w)
         print(f"  {len(masks)} candidates  score range: {scores[0]:.4f} → {scores[-1]:.4f}")
 
         best_idx, combined, coverages = pick_by_combined(masks, scores, pc1_map, orig_h, orig_w)
@@ -267,9 +297,11 @@ def main() -> None:
                 alpha=args.alpha,
             ))
 
+        img_elapsed = time.perf_counter() - t_img
         summary.append({
             "image": str(image_path),
             "n_candidates": len(masks),
+            "elapsed_s": round(img_elapsed, 2),
             "pick": {
                 "rank": best_idx + 1,
                 "score": scores[best_idx],
@@ -278,11 +310,18 @@ def main() -> None:
                 "area": float(best_mask.mean()),
             },
         })
-        print()
+        print(f"  elapsed: {img_elapsed:.1f}s\n")
+
+    _hook_handle.remove()
+
+    total_elapsed = time.perf_counter() - t_total
+    h, rem = divmod(int(total_elapsed), 3600)
+    m, s = divmod(rem, 60)
+    elapsed_str = (f"{h}h {m}m {s}s" if h else f"{m}m {s}s" if m else f"{total_elapsed:.1f}s")
 
     with open(args.metadata_out, "w") as f:
         json.dump(summary, f, indent=2)
-    print(f"Done.  {len(summary)} image(s) → {args.metadata_out}")
+    print(f"Done.  {len(summary)} image(s) → {args.metadata_out}  |  Elapsed: {elapsed_str}")
 
 
 if __name__ == "__main__":
