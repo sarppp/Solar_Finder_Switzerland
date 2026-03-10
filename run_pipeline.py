@@ -5,11 +5,11 @@ Unified Solar Panel Detection Pipeline
  
 Runs the full pipeline in one go:
  
-  1. region_building_groups.py  – discover buildings in a region/canton
-  2. get_building_screenshot.py – take aerial screenshots
-  3. feature_guided_sam3.py     – segment buildings (DINOv2/ConvNeXt + SAM3)
-  4. crop_and_clean_image.py    – crop & isolate each building
-  5. detect_solar_panels.py     – detect solar panels
+  1. region_building_groups.py  - discover buildings in a region/canton
+  2. get_building_screenshot.py - take aerial screenshots
+  3. feature_guided_sam3.py     - segment buildings (SAM3)
+  4. crop_and_clean_image.py    - crop & isolate each building
+  5. detect_solar_panels.py     - detect solar panels
  
 All intermediate paths are auto-derived from --region / --output-dir so you
 only need to specify the search area and the parameters you care about.
@@ -254,7 +254,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Limit number of buildings to process in stages 2-5")
  
     # ── Stage 1: region_building_groups ────────────────────────────────
-    s1 = p.add_argument_group("Stage 1 – Building discovery (region_building_groups.py)")
+    s1 = p.add_argument_group("Stage 1 - Building discovery (region_building_groups.py)")
     s1.add_argument("--min-roof-area", type=float, default=300.0,
                     help="Minimum roof area in m² (default: 300)")
     s1.add_argument("--plant-radius", type=float, default=30.0,
@@ -269,8 +269,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Only keep buildings with a neighbor within this distance (default: 200m, 0=disable)")
     s1.add_argument("--max-results", type=int, default=2000,
                     help="Maximum number of results to keep (default: 2000)")
-    s1.add_argument("--residential-only", action="store_true",
-                    help="Only keep residential buildings (via GWR lookup)")
+    s1.add_argument("--building-types", default="residential", choices=["all", "residential"],
+                    help="Building types to process (default: residential)")
     s1.add_argument("--residential-gkat-codes", default="1020,1030,1040",
                     help="GKAT codes considered residential (default: 1020,1030,1040)")
     s1.add_argument("--dedupe-by-esid", action="store_true", default=True,
@@ -288,7 +288,7 @@ def build_parser() -> argparse.ArgumentParser:
     s1.add_argument("--sleep-s", type=float, default=0.05)
  
     # ── Stage 2: get_building_screenshot ───────────────────────────────
-    s2 = p.add_argument_group("Stage 2 – Screenshots (get_building_screenshot.py)")
+    s2 = p.add_argument_group("Stage 2 - Screenshots (get_building_screenshot.py)")
     s2.add_argument("--screenshot-size-m", type=float, default=50.0,
                     help="Screenshot coverage in meters (default: 50)")
     s2.add_argument("--screenshot-width", type=int, default=800)
@@ -299,7 +299,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Re-download all screenshots")
  
     # ── Stage 3: feature_guided_sam3 ───────────────────────────────────
-    s3 = p.add_argument_group("Stage 3 – SAM3 segmentation (feature_guided_sam3.py)")
+    s3 = p.add_argument_group("Stage 3 - SAM3 segmentation (feature_guided_sam3.py)")
     s3.add_argument("--sam-prompt", default="the main building",
                     help="Text prompt for SAM3")
     s3.add_argument("--sam-confidence", type=float, default=0.0,
@@ -308,7 +308,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
     # ── Stage 4: crop_and_clean_image ──────────────────────────────────
-    s4 = p.add_argument_group("Stage 4 – Crop & clean (crop_and_clean_image.py)")
+    s4 = p.add_argument_group("Stage 4 - Crop & clean (crop_and_clean_image.py)")
     s4.add_argument("--crop-background", default="transparent",
                     choices=["transparent", "white", "black"],
                     help="Background for non-building area (default: transparent)")
@@ -316,7 +316,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Padding around crop in pixels (default: 0)")
  
     # ── Stage 5: detect_solar_panels ───────────────────────────────────
-    s5 = p.add_argument_group("Stage 5 – Solar panel detection (detect_solar_panels.py)")
+    s5 = p.add_argument_group("Stage 5 - Solar panel detection (detect_solar_panels.py)")
     s5.add_argument(
         "--detection-input-dir",
         default=None,
@@ -423,7 +423,7 @@ def main() -> None:
         ]
         if pv_only:
             cmd.append("--pv-only-plants")
-        if args.residential_only:
+        if args.building_types == "residential":
             cmd.append("--residential-only")
         if args.residential_gkat_codes:
             cmd += ["--residential-gkat-codes", args.residential_gkat_codes]
