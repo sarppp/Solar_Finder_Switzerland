@@ -1,9 +1,9 @@
 # Solar Roof Toolkit
 
 
-> End-to-end Swiss solar panel detection — from canton-scale building discovery to per-roof AI segmentation and multi-model panel detection.
+> End-to-end Swiss solar panel detection from canton-scale building discovery to per-roof AI segmentation and multi-model panel detection.
 
-📊 [Full walkthrough (slides)](Zero_to_Solar.pdf) — dataset comparison, coordinate geometry, relief displacement, and the SAM3 debugging story
+📊 [Full walkthrough (slides):](assets/Zero_to_Solar.pdf) dataset comparison, coordinate geometry, relief displacement, and the SAM3 debugging story
 
 <img src="assets/readme1.png" alt="Dashboard" width="700"/>
 
@@ -15,7 +15,7 @@ This toolkit automates the full pipeline for identifying buildings **without** s
 
 1. **Discovers buildings** at region or canton scale via GeoAdmin WMS/MapServer, with residential and PV filtering
 2. **Captures aerial screenshots** of each building using Swiss orthophoto tiles
-3. **Segments the roof** using SAM3 with internal ViT-H feature scoring (PC1 contrast) — no external guidance model needed
+3. **Segments the roof** using SAM3 with internal ViT-H feature scoring (PC1 contrast) so no external guidance model needed
 4. **Detects solar panels** using YOLO, OpenAI Vision, Gemini, or Ollama, with automatic retry across models
 5. **Visualises results** in an interactive Streamlit dashboard with per-building inspection
 6. **Excel report** if needed export results to Excel as a report
@@ -123,39 +123,9 @@ combined = SAM3_score × PC1_recall × center_score
 ```
 
 **Fallback:** when PC1 is degenerate (scattered car-roof reflections, max recall < 15%),
-the formula reduces to `SAM3_score × center_score` — the center prior still applies.
+the formula reduces to `SAM3_score × center_score` so the center prior still applies.
 
-**Performance:** Eliminated a redundant ViT-H backbone pass by registering the L23 hook once before the processing loop. `processor.set_image()` triggers the backbone as a side effect, so tokens are already captured when scoring runs — no second forward pass needed. ~1.8× speedup per image.
-
-
-### Domain Challenges & Data Quality
-
-Working with Swiss GeoAdmin data surface several non-obvious problems that required careful handling:
-
-**API data lag.** The `has_pv_plant` field returns `false` for buildings with visible solar panels when the installation hasn't been administratively registered yet. This is why visual detection can't be skipped even when the API suggests no panel exists — it was discovered using a real building (our house) where the API was wrong but YOLO caught it.
-
-**EGRID/ESID/EGID Definitions.** This pipeline relies on a specific hierarchy of Swiss identifiers to ensure data integrity:
-* **EGID (Federal Building ID):** A unique physical building identifier nationwide from the GWR (Federal Building Register).
-* **EGRID (Federal Grounds ID):** Identifies the land register parcel. Multiple buildings or addresses (e.g., 8 units at "Bäraustrasse 71") often share one EGRID.
-* **ESID (Federal Street Address Entry ID):** A unique identifier for the specific street address entry.
-
-**Deduplication.** Naive deduplication by EGRID alone would silently merge unrelated buildings. The pipeline deduplicates by both ESID and EGRID, with configurable GWR attribute matching to ensure we don't skip valid roof targets.
-
-**GKAT classification noise.** Building category codes don't always match what's on the ground. A GKAT 1040 (pure residential) building turned out to be a large industrial structure. Visual confirmation via the SAM3 + YOLO pipeline catches these misclassifications.
-
-**Relief displacement.** Aerial orthophotos exhibit radial shift caused by building height — `d = (r·h) / H`. Since Swiss GeoAdmin doesn't expose true orthophoto data via API and the flying height isn't published, the shift can't be corrected analytically. SAM3's prompt-based segmentation is robust to this because it segments by visual content rather than relying on registered coordinates.
-
-
-### Async Performance
-| Bottleneck | Approach | Speedup |
-|---|---|---|
-| Screenshot downloads | `asyncio.gather` + `Semaphore(5)` to be kind, concurrent facet/metadata/satellite | ~166× |
-| Building tile querying | Async worker pool with `asyncio.Queue`, O(1) set lookups | ~6× |
-| SAM3 backbone | Single ViT-H pass via hook, token reuse | ~1.8× |
-
-### Multi-Model Detection with Retry Logic
-
-`detect_solar_panels.py` supports YOLO (local), OpenAI Vision, Gemini, and Ollama. Failed detections automatically retry across fallback models, with configurable delays to handle API rate limits.
+**Performance:** Eliminated a redundant ViT-H backbone pass by registering the L23 hook once before the processing loop. `processor.set_image()` triggers the backbone as a side effect, so tokens are already captured when scoring runs, no second forward pass needed. ~1.8× speedup per image.
 
 ---
 
@@ -183,6 +153,35 @@ Working with Swiss GeoAdmin data surface several non-obvious problems that requi
 
 After SAM3 crops and isolates the target building, YOLO operates only on that region, wrong-building detections are structurally near impossible.
 
+
+### Domain Challenges & Data Quality
+
+Working with Swiss GeoAdmin data surface several non-obvious problems that required careful handling:
+
+**API data lag.** The `has_pv_plant` field returns `false` for buildings with visible solar panels when the installation hasn't been administratively registered yet. This is why visual detection can't be skipped even when the API suggests no panel exists, it was discovered using a real building (our house) where the API was wrong but YOLO caught it.
+
+**EGRID/ESID/EGID Definitions.** This pipeline relies on a specific hierarchy of Swiss identifiers to ensure data integrity:
+* **EGID (Federal Building ID):** A unique physical building identifier nationwide from the GWR (Federal Building Register).
+* **EGRID (Federal Grounds ID):** Identifies the land register parcel. Multiple buildings or addresses (e.g., 8 units at "Bäraustrasse 71") often share one EGRID.
+* **ESID (Federal Street Address Entry ID):** A unique identifier for the specific street address entry.
+
+**Deduplication.** Naive deduplication by EGRID alone would silently merge unrelated buildings. The pipeline deduplicates by both ESID and EGRID, with configurable GWR attribute matching to ensure we don't skip valid roof targets.
+
+**GKAT classification noise.** Building category codes don't always match what's on the ground. A GKAT 1040 (pure residential) building turned out to be a large industrial structure. Visual confirmation via the SAM3 + YOLO pipeline catches these misclassifications.
+
+**Relief displacement.** Aerial orthophotos exhibit radial shift caused by building height — `d = (r·h) / H`. Since Swiss GeoAdmin doesn't expose true orthophoto data via API and the flying height isn't published, the shift can't be corrected analytically. SAM3's prompt-based segmentation is robust to this because it segments by visual content rather than relying on registered coordinates.
+
+
+### Async Performance
+| Bottleneck | Approach | Speedup |
+|---|---|---|
+| Screenshot downloads | `asyncio.gather` + `Semaphore(5)` to be kind, concurrent facet/metadata/satellite | ~166× |
+| Building tile querying | Async worker pool with `asyncio.Queue`, O(1) set lookups | ~6× |
+| SAM3 backbone | Single ViT-H pass via hook, token reuse | ~1.8× |
+
+### Multi-Model Detection with Retry Logic
+
+`detect_solar_panels.py` supports YOLO (local), OpenAI Vision, Gemini, and Ollama. Failed detections automatically retry across fallback models, with configurable delays to handle API rate limits.
 
 
 ## Setup
