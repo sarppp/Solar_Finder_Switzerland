@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SAM3 building segmentation guided by SAM3's own layer-23 features.
 
-Scoring: combined = SAM3_score × pc1_recall × center_score
+Scoring: combined = SAM3_score x pc1_recall x center_score
   SAM3_score   — language model confidence for "the main building"
   pc1_recall   — |mask ∩ hot| / |hot|  where hot = L23 PC1 above image median
   center_score — Gaussian proximity to image centre (domain prior: every image
@@ -24,10 +24,34 @@ candidates even when PC1 hot region is scattered or degenerate.
 
 PC1 fallback: when max PC1 recall across all candidates < PC1_FALLBACK_RECALL,
 the PC1 signal is degenerate (e.g. scattered car-roof reflections). In that
-case combined = SAM3_score × center_score (center prior still applied).
+case combined = SAM3_score x center_score (center prior still applied).
 
 No external models. No hand-tuned thresholds. All signals from SAM3 + geometry.
 
+--- Why external guidance (DINOv2/ConvNeXt) was abandoned ---
+
+Early versions used DINOv2 and ConvNeXt heatmaps as spatial priors to guide
+mask selection. During debugging, both models consistently gave pc1_coverage=1.0
+for the top-ranked mask. That saturation exposed a formula problem: when
+precision=1.0, SAM3_score x precision reduces to just SAM3_score — the external
+model contributes nothing.
+
+To find the root cause, I hooked into SAM3's decoder cross-attention
+(transformer.decoder.layers[5].cross_attn, shape (1, 8 heads, 201 queries,
+5184 image tokens)) and visualised rank-1 vs rank-2 attention maps. The result:
+SAM3's decoder splits buildings into per-wing queries by design. The more
+uniform sub-region (a single wing) gets the higher language score because its
+features are more homogeneous — not because it's the better mask.
+
+No precision-based spatial prior can fix this: both a wing mask and the full
+building mask sit inside the hot zone, so precision saturates for both.
+
+The fix: switch from precision to recall. "Does this mask cover the full hot
+zone?" instead of "Is this mask inside the hot zone?" The whole-building mask
+covers ~35% of the total PC1 hot zone vs ~28% for the wing mask. Multiplied by
+their SAM3 scores: 0.0888x0.350 > 0.1029x0.277. Completeness wins.
+
+This also eliminates the two external model dependencies entirely.
 Usage:
   uv run python feature_guided_sam3.py image.png
   uv run python feature_guided_sam3.py "screenshots/*.png" --compare

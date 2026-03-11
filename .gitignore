@@ -90,3 +90,4 @@ tests/*
 .ipynb_checkpoints
 *.html
 notebooks/*
+*.txt
