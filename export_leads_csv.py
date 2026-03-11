@@ -275,7 +275,9 @@ def load_buildings(path: Path) -> dict:
             "num_apartments":         g.get("ganzwhg"),
             "footprint_m2":           g.get("garea"),
             "volume_m3":              g.get("gvol"),
-            "protected_building":     g.get("gschutzr"),
+            "protected_building":     (None if g.get("gschutzr") is None
+                                      else ("No" if g.get("gschutzr") == 0
+                                      else f"Yes (code {g.get('gschutzr')})")),
 
             # ── Primary heating system ───────────────────────────────────
             "heating_system_code":    heating1_code,
@@ -413,13 +415,27 @@ FLOAT_PRECISION = {
 }
 
 
+def _reformat_date(v) -> str:
+    """Convert DD.MM.YYYY to YYYY-MM-DD so European Excel doesn't mangle the dots."""
+    if not v or not isinstance(v, str):
+        return v
+    parts = v.strip().split(".")
+    if len(parts) == 3 and all(p.isdigit() for p in parts):
+        dd, mm, yyyy = parts
+        return f"{yyyy}-{mm}-{dd}"
+    return v
+
+
+DATE_COLUMNS = {"heating_data_date"}
+
+
 def _clean_row(row: dict) -> dict:
     out = {}
     for k, v in row.items():
-        if k in FLOAT_PRECISION and v is not None:
+        if k in DATE_COLUMNS:
+            out[k] = _reformat_date(v)
+        elif k in FLOAT_PRECISION and v is not None:
             try:
-                # Format all float values with comma as decimal separator
-                # for European Excel settings that use semicolon delimiters
                 out[k] = f"{float(v):.{FLOAT_PRECISION[k]}f}".replace('.', ',')
             except (TypeError, ValueError):
                 out[k] = v
@@ -461,7 +477,9 @@ BUILDING  (source: Swiss Federal Building Register, GWR)
   num_apartments            integer   Number of residential units in the building (ganzwhg).
   footprint_m2              decimal   Ground-floor footprint area in m2 (garea).
   volume_m3                 decimal   Building volume in m3 (gvol). Often not recorded.
-  protected_building        integer   Heritage/protection status code. Null if not protected.
+  protected_building        text      Heritage protection status. "No" = explicitly not protected.
+                                      Blank = not recorded in GWR (also means no known protection).
+                                      "Yes (code X)" = protected building — check before any roof work.
 
 HEATING  (source: GWR)
   heating_system_code       integer   GWR code for the primary heating system (gwaerzh1).
