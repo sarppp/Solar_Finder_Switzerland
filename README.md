@@ -169,7 +169,11 @@ Working with Swiss GeoAdmin data surface several non-obvious problems that requi
 
 **GKAT classification noise.** Building category codes don't always match what's on the ground. A GKAT 1040 (pure residential) building turned out to be a large industrial structure. Visual confirmation via the SAM3 + YOLO pipeline catches these misclassifications.
 
-**Relief displacement.** Aerial orthophotos exhibit radial shift caused by building height — `d = (r·h) / H`. Since Swiss GeoAdmin doesn't expose true orthophoto data via API and the flying height isn't published, the shift can't be corrected analytically. SAM3's prompt-based segmentation is robust to this because it segments by visual content rather than relying on registered coordinates.
+**Relief displacement.** Aerial orthophotos exhibit radial shift caused by building height:
+
+$$d = \frac{r \cdot h}{H}$$
+
+Since Swiss GeoAdmin doesn't expose true orthophoto data via API and the flying height $H$ isn't published, the shift can't be corrected analytically. SAM3's prompt-based segmentation is robust to this because it segments by visual content rather than relying on registered coordinates.
 
 
 ### Async Performance
