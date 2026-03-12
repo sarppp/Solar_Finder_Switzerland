@@ -22,6 +22,14 @@ the SAM3 score kills tiny fragments (score ≈ 0) and large wrong-region
 masks (coverage ≈ 0). Center score eliminates geometrically off-centre
 candidates even when PC1 hot region is scattered or degenerate.
 
+Why layer 23 and not 31 (the last layer): SAM3 is a 32-layer ViT-H with
+only 4 global attention layers (7, 15, 23, 31). Layer 23 is the last global
+layer before the final 8 layers, which shift from semantic encoding toward
+FPN boundary preparation. CKA analysis shows layer 31 breaks from the
+semantic cluster that 7/15/23 share. Layer 23 preserves the cleanest
+building-vs-background axis; layer 31 encodes finer segmentation detail
+that fragments PC1 variance across more components.
+
 PC1 fallback: when max PC1 recall across all candidates < PC1_FALLBACK_RECALL,
 the PC1 signal is degenerate (e.g. scattered car-roof reflections). In that
 case combined = SAM3_score x center_score (center prior still applied).
@@ -38,18 +46,18 @@ model contributes nothing.
 
 To find the root cause, I hooked into SAM3's decoder cross-attention
 (transformer.decoder.layers[5].cross_attn, shape (1, 8 heads, 201 queries,
-5184 image tokens)) and visualised rank-1 vs rank-2 attention maps. The result:
-SAM3's decoder splits buildings into per-wing queries by design. The more
-uniform sub-region (a single wing) gets the higher language score because its
-features are more homogeneous — not because it's the better mask.
+5184 image tokens)) and inspected per-query language scores and attention maps.
+The dominant query (rank-1) consistently scores far above all others and tends
+to attend to a more homogeneous region than lower-ranked queries — which is
+why a sub-building mask can outscore the full footprint.
 
-No precision-based spatial prior can fix this: both a wing mask and the full
+No precision-based spatial prior can fix this: both a partial mask and the full
 building mask sit inside the hot zone, so precision saturates for both.
 
 The fix: switch from precision to recall. "Does this mask cover the full hot
 zone?" instead of "Is this mask inside the hot zone?" The whole-building mask
-covers ~35% of the total PC1 hot zone vs ~28% for the wing mask. Multiplied by
-their SAM3 scores: 0.0888x0.350 > 0.1029x0.277. Completeness wins + PC1 fallback.
+covers ~35% of the total PC1 hot zone vs ~28% for the partial mask. Multiplied
+by their SAM3 scores: 0.0888x0.350 > 0.1029x0.277. Completeness wins + PC1 fallback.
 
 This also eliminates the two external model dependencies entirely.
 Usage:

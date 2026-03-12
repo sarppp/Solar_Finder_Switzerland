@@ -50,13 +50,13 @@ more often, but still couldn't reliably segment the building.
 So I started to debug much deeper. During debugging, both models DINOv2 and SAM3 gave `pc1_coverage = 1.0` for the top-ranked mask. That saturation was the clue: if any spatial prior reaches 1.0, the formula `SAM3_score × precision` degrades to just `SAM3_score`, and the external model contributes nothing. The problem wasn't the guidance model actually, rather it was the scoring formula.
 
 So I dropped external models entirely.
-Used SAM3's own layer-23 features (PC1, 56.8% of token variance) to score masks by how much of the semantic "hot zone" they cover. Solved the issue of not segmenting correctly, but PC1 recall alone still picked the wrong wing when SAM3 split a building into per-wing queries.
+Used SAM3's own layer-23 features (PC1, 56.8% of token variance) to score masks by how much of the semantic "hot zone" they cover. Solved the issue of not segmenting correctly, but PC1 recall alone still sometimes picked a partial mask when SAM3's top-scoring query covered only a sub-region of the building.
 
 <img src="assets/left_wing.png" alt="Left_wing:" width="300"/>
 
 *Only left wing was chosen*
 
-**Iteration 3**: To understand why, I hooked into SAM3's decoder cross-attention (`transformer.decoder.layers[5].cross_attn`, shape `(1, 8 heads, 201 queries, 5184 image tokens)`) and visualised the attention maps for rank 1 vs rank 2, rank 3.. etc. The result was clear: SAM3's decoder was splitting buildings into per-wing queries by design, and the more uniform sub-region naturally scores higher. No spatial prior based on *precision* (is this mask in the right place?) can fix that.
+**Iteration 3**: To understand why, I hooked into SAM3's decoder cross-attention (`transformer.decoder.layers[5].cross_attn`, shape `(1, 8 heads, 201 queries, 5184 image tokens)`) and inspected per-query language scores and attention maps. The dominant query scores far above all others (e.g. 2.16 vs −0.30 for rank-2) and tends to attend to a more homogeneous region and which is why a partial mask can outscore the full footprint.
 
 Current precision, $\frac{|\text{mask} \cap \text{hot}|}{|\text{mask}|}$, saturates at $1.0$ when the mask is entirely inside the warm zone. This means Rank 1 (a subset of the building) gets the same precision as Rank 2 (the whole building). 
 
@@ -74,7 +74,7 @@ score = SAM3_score × PC1_recall × center_score
 ```
 
 
-**Iteration 4**: However, it was not enough. The model was supposed to choose the building in the middle!
+**Iteration 4**: Iteration 3 fixed the partial-mask problem within a single building, but broke inter-building selection. When two different buildings are in frame and neither strongly overlaps the PC1 hot zone, recall values for both are near zero and the small numerical difference is noise. Multiplying by that noise flips the SAM3 ranking. The model was supposed to choose the building in the middle!
 
 <img src="assets/before_fix_sam3.png" alt="Before fix SAM3:" width="300"/>
 
