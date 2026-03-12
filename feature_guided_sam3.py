@@ -49,7 +49,7 @@ building mask sit inside the hot zone, so precision saturates for both.
 The fix: switch from precision to recall. "Does this mask cover the full hot
 zone?" instead of "Is this mask inside the hot zone?" The whole-building mask
 covers ~35% of the total PC1 hot zone vs ~28% for the wing mask. Multiplied by
-their SAM3 scores: 0.0888x0.350 > 0.1029x0.277. Completeness wins.
+their SAM3 scores: 0.0888x0.350 > 0.1029x0.277. Completeness wins + PC1 fallback.
 
 This also eliminates the two external model dependencies entirely.
 Usage:
